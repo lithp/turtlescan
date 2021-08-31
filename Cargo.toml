@@ -3,7 +3,7 @@ name = "turtlescan"
 version = "0.1.0"
 edition = "2018"
 description = "Explore Ethereum from the safety of your shell"
-repository = "github.com/lithp/turtlescan"
+repository = "https://github.com/lithp/turtlescan"
 license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
