@@ -30,7 +30,10 @@ async fn new_ws_infura_provider(project_id: &str) -> Provider<Ws> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    log4rs::init_file("log.yml", Default::default()).unwrap();
+
+    // initialize logging, .ok() because rn logging is just for debugging anyway
+    log4rs::init_file("log.yml", Default::default()).ok();
+
     debug!("started");
 
     let matches = App::new("turtlescan")
