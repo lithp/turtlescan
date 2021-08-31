@@ -1,8 +1,7 @@
-
+use ethers_core::types::Block as EthBlock;
 use ethers_core::types::{TxHash, U256 /*H256*/};
 use std::fmt::Write;
 use std::ops::Div;
-use ethers_core::types::Block as EthBlock;
 
 fn format_block_hash(hash: &[u8]) -> String {
     //TODO(2021-08-29) surely there's a better way...

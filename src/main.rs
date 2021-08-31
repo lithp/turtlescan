@@ -6,7 +6,7 @@ mod util;
 
 use ansi_term::Style as AnsiStyle;
 use clap::{App, Arg, SubCommand};
-use ethers_providers::{Http, Middleware, Provider, Ws, JsonRpcClient};
+use ethers_providers::{Http, JsonRpcClient, Middleware, Provider, Ws};
 use serde_json;
 use std::convert::TryFrom;
 use std::env;
@@ -17,32 +17,26 @@ use log4rs;
 
 use simple_error::bail;
 
-
 // https://mainnet.infura.io/v3/PROJECT_ID
 // wss://mainnet.infura.io/ws/v3/PROJECT_ID
-
 
 enum TypedProvider {
     Ws(Provider<Ws>),
     Http(Provider<Http>),
 }
 
-
 async fn new_provider(url: String) -> Result<TypedProvider, Box<dyn Error>> {
     if url.starts_with("http") {
         Ok(TypedProvider::Http(Provider::<Http>::try_from(url)?))
     } else if url.starts_with("ws") {
-        Ok(TypedProvider::Ws(Provider::<Ws>::connect(url)
-            .await?))
+        Ok(TypedProvider::Ws(Provider::<Ws>::connect(url).await?))
     } else {
         bail!("could not parse provider url")
     }
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-
     // initialize logging, .ok() because rn logging is just for debugging anyway
     log4rs::init_file("log.yml", Default::default()).ok();
 
