@@ -15,7 +15,7 @@ use tui::widgets::{Block, Borders, List, ListItem, ListState, Tabs};
 use std::thread;
 use std::time;
 
-use ethers_providers::{Http, Middleware, Provider};
+use ethers_providers::{Middleware, Provider, JsonRpcClient};
 use log::debug;
 use std::error::Error;
 use termion::event::Key;
@@ -30,7 +30,7 @@ use termion::input::TermRead;
 
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
-pub fn run_tui(provider: Provider<Http>) -> Result<(), Box<dyn Error>> {
+pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
@@ -136,7 +136,7 @@ pub fn run_tui(provider: Provider<Http>) -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::main(worker_threads = 1)]
-async fn run_networking(provider: Provider<Http>, highest_block: Arc<Mutex<Option<u32>>>) {
+async fn run_networking<T: JsonRpcClient>(provider: Provider<T>, highest_block: Arc<Mutex<Option<u32>>>) {
     debug!("started networking thread");
     async_sleep(time::Duration::from_millis(1000)).await;
     {

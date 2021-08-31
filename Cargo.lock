@@ -1542,6 +1542,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simple-error"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c1c2ededd95f93b1d65e7f8b5b17670e926bf9cbb55f8b91b26b0bd40d3259"
+
+[[package]]
 name = "slab"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1878,6 +1884,7 @@ dependencies = [
  "log4rs",
  "serde",
  "serde_json",
+ "simple-error",
  "term_size",
  "termion",
  "tokio",

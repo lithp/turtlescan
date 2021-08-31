@@ -1,9 +1,11 @@
+extern crate simple_error;
+
 mod tail_blocks;
 mod tui;
 
 use ansi_term::Style as AnsiStyle;
 use clap::{App, Arg, SubCommand};
-use ethers_providers::{Http, Middleware, Provider, Ws};
+use ethers_providers::{Http, Middleware, Provider, Ws, JsonRpcClient};
 use serde_json;
 use std::convert::TryFrom;
 use std::env;
@@ -12,21 +14,30 @@ use std::error::Error;
 use log::debug;
 use log4rs;
 
-fn new_infura_provider(project_id: &str) -> Provider<Http> {
-    let base_url = "https://mainnet.infura.io/v3/";
-    let url = format!("{}{}", base_url, project_id);
+use simple_error::bail;
 
-    Provider::<Http>::try_from(url).expect("could not instantiate HTTP Provider")
+
+// https://mainnet.infura.io/v3/PROJECT_ID
+// wss://mainnet.infura.io/ws/v3/PROJECT_ID
+
+
+enum TypedProvider {
+    Ws(Provider<Ws>),
+    Http(Provider<Http>),
 }
 
-async fn new_ws_infura_provider(project_id: &str) -> Provider<Ws> {
-    let base_url = "wss://mainnet.infura.io/ws/v3/";
-    let url = format!("{}{}", base_url, project_id);
 
-    Provider::<Ws>::connect(url)
-        .await
-        .expect("could not instantiate Ws Provider")
+async fn new_provider(url: String) -> Result<TypedProvider, Box<dyn Error>> {
+    if url.starts_with("http") {
+        Ok(TypedProvider::Http(Provider::<Http>::try_from(url)?))
+    } else if url.starts_with("wss") {
+        Ok(TypedProvider::Ws(Provider::<Ws>::connect(url)
+            .await?))
+    } else {
+        bail!("could not parse provider url")
+    }
 }
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -41,44 +52,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .author("Brian Cloutier <brian@ethereum.org>")
         .about("Explore from the safety of your shell")
         .arg(
-            Arg::with_name("infura")
+            Arg::with_name("provider.url")
                 .takes_value(true)
-                .long("infura")
-                .help("your infura project ID"),
+                .long("provider.url")
+                .help("the address of the JSON-RPC server (e.g. https://mainnet.infura.io/v3/PROJECT_ID)"),
         )
         .subcommand(SubCommand::with_name("getBlock").about("emits the current block (json)"))
         .subcommand(SubCommand::with_name("tui").about("starts a tui (experimental)"))
         .subcommand(SubCommand::with_name("tailBlocks").about("emits blocks as they are received"))
         .get_matches();
 
-    let infura_project_id: String = {
-        // TOOD(2021-08-30): I bet there's a way to use &str's.
-        if let Some(project_id) = matches.value_of("infura") {
-            project_id.to_string()
-        } else if let Ok(project_id) = env::var("TURTLE_INFURA_ID") {
-            project_id
+    let provider_url: String = {
+        if let Some(url) = matches.value_of("provider.url") {
+            url.to_string()
+        } else if let Ok(url) = env::var("TURTLE_PROVIDER") {
+            url
         } else {
-            panic!("You must provide an infura project id (try setting TURTLE_INFURA_ID");
+            eprintln!("You must provide a JSON-RPC server");
+            eprintln!("Try setting TURTLE_PROVIDER, or passing --provider.url");
+            bail!("Could not connect to server");
         }
     };
 
     match matches.subcommand_name() {
         Some("getBlock") => {
-            let provider = new_infura_provider(&infura_project_id);
-            get_block(provider).await
+            let typed_provider = new_provider(provider_url).await?;
+
+            //TODO: there must be a better way to do this
+            match typed_provider {
+                TypedProvider::Ws(provider) => get_block(provider).await,
+                TypedProvider::Http(provider) => get_block(provider).await,
+            }
         }
         Some("tailBlocks") => {
-            let provider = new_ws_infura_provider(&infura_project_id).await;
+            let typed_provider = new_provider(provider_url).await?;
+
             println!(
                 "{} - explore from the safety of your shell",
                 AnsiStyle::new().bold().paint("turtlescan"),
             );
 
-            tail_blocks::tail_blocks(provider).await
+            if let TypedProvider::Ws(provider) = typed_provider {
+                tail_blocks::tail_blocks(provider).await
+            } else {
+                bail!("tailBlocks requires connecting via websocket")
+            }
         }
         Some("tui") => {
-            let provider = new_infura_provider(&infura_project_id);
-            tui::run_tui(provider)
+            let typed_provider = new_provider(provider_url).await?;
+
+            match typed_provider {
+                TypedProvider::Ws(provider) => tui::run_tui(provider),
+                TypedProvider::Http(provider) => tui::run_tui(provider),
+            }
         }
         _ => {
             println!("please select a subcommand");
@@ -88,7 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn get_block(provider: Provider<Http>) -> Result<(), Box<dyn Error>> {
+async fn get_block<T: JsonRpcClient>(provider: Provider<T>) -> Result<(), Box<dyn Error>> {
     // for now emits json, which can easily be formatted using jq
     // TODO(2021-08-27) make the output format configurable
     // TODO(2021-08-30) any kind of error handling
