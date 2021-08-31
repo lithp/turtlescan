@@ -18,7 +18,7 @@ futures = "0.3"
 tokio = { version = "1.10.0", features = ["full"] }
 clap = "2.33.3"
 tui = "0.16"
-termion = "1.5"
+termion = "1.5.6"
 log4rs="1.0.0"
 log="0.4.14"
 term_size="0.3.2"

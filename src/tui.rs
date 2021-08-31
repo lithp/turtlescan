@@ -1,3 +1,5 @@
+use crate::util;
+
 use std::io;
 use std::sync::{Arc, Mutex};
 use termion::raw::IntoRawMode;
@@ -21,12 +23,29 @@ use std::error::Error;
 use termion::event::Key;
 use termion::input::TermRead;
 
+use std::collections::VecDeque;
+
+use ethers_core::types::TxHash;
+use ethers_core::types::Block as EthBlock;
+
+use std::sync::mpsc;
+
+
 /*
  * This has the promise to be a pretty cool TUI but at the moment it's just a demo.
  *
  * Currently it is a very complicated and unintuitive way to fetch the current block
  * number from infura.
  */
+
+
+enum UIMessage {
+    // a message sent to the UI
+    Key(termion::event::Key),
+    Refresh(),
+}
+
+
 
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
@@ -36,17 +55,26 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut stdin = termion::async_stdin().keys();
+    let (tx, rx) = mpsc::channel();
+
+    let keys_tx = tx.clone();
+    thread::spawn(move || {
+        let stdin = io::stdin().keys();
+
+        for key in stdin {
+            let mapped = key.map(|k| UIMessage::Key(k));
+            keys_tx.send(mapped).unwrap();
+        }
+    });
+
+    // if we need it: prevents us from blocking when we check for more input
+    // let mut stdin = termion::async_stdin().keys();
 
     let mut current_tab: usize = 0;
 
     let tab_count = 3;
 
-    let blocks = vec![
-        (1311908, "Flexpool.io"),
-        (1311907, "FLEXPOOL.IO"),
-        (1311906, "Nanopool"),
-    ];
+    let blocks: VecDeque<EthBlock<TxHash>> = VecDeque::new();
 
     let highest_block: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
@@ -56,9 +84,7 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
     // no real need to hold onto this handle, the thread will be killed when this main
     // thread exits.
     let highest_block_clone = highest_block.clone();
-    let _networking_handler = thread::spawn(move || {
-        run_networking(provider, highest_block_clone);
-    });
+    let _block_fetcher = BlockFetcher::start(provider, highest_block_clone, tx);
 
     loop {
         terminal.draw(|f| {
@@ -71,12 +97,8 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
             let block_lines: Vec<ListItem> = blocks
                 .iter()
                 .map(|block| {
-                    let span = Spans::from(vec![
-                        Span::raw(block.0.to_string()),
-                        Span::raw(" "),
-                        Span::raw(block.1.to_string()),
-                    ]);
-                    ListItem::new(span)
+                    let formatted = util::format_block(block);
+                    ListItem::new(Span::raw(formatted))
                 })
                 .collect();
 
@@ -111,38 +133,64 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
             f.render_widget(tabs, chunks[1]);
         })?;
 
-        let input = stdin.next();
+        // let input = stdin.next();  // blocks until we have more input
+        let input = rx.recv().unwrap()?;  // blocks until we have more input
 
-        if let Some(Ok(key)) = input {
-            match key {
-                Key::Char('q') => break,
-                Key::Right => {
-                    current_tab = (current_tab + 1) % tab_count;
-                }
-                Key::Left => {
-                    current_tab = match current_tab {
-                        0 => tab_count - 1,
-                        x => (x - 1) % tab_count,
+        match input {
+            UIMessage::Key(key) => {
+                match key {
+                    Key::Char('q') => break,
+                    Key::Right => {
+                        current_tab = (current_tab + 1) % tab_count;
                     }
+                    Key::Left => {
+                        current_tab = match current_tab {
+                            0 => tab_count - 1,
+                            x => (x - 1) % tab_count,
+                        }
+                    }
+                    _ => (),
                 }
-                _ => thread::sleep(time::Duration::from_millis(10)),
-            }
+            },
+            UIMessage::Refresh() => {}
         }
-
-        thread::sleep(time::Duration::from_millis(10));
     }
 
     Ok(())
 }
 
+
+struct BlockFetcher {
+    _bg_thread: thread::JoinHandle<()>
+}
+
+impl BlockFetcher {
+
+    fn start<T: JsonRpcClient + 'static>(provider: Provider<T>, highest_block: Arc<Mutex<Option<u32>>>, tx: mpsc::Sender<Result<UIMessage, io::Error>>) -> BlockFetcher {
+        let handle = thread::spawn(move || {
+            run_networking(provider, highest_block, tx);
+        });
+
+        BlockFetcher {
+            _bg_thread: handle
+        }
+    }
+
+    fn _fetch(&self, _block_number: u32) {
+
+    }
+}
+
+
 #[tokio::main(worker_threads = 1)]
-async fn run_networking<T: JsonRpcClient>(provider: Provider<T>, highest_block: Arc<Mutex<Option<u32>>>) {
+async fn run_networking<T: JsonRpcClient>(provider: Provider<T>, highest_block: Arc<Mutex<Option<u32>>>, tx: mpsc::Sender<Result<UIMessage, io::Error>>) {
     debug!("started networking thread");
     async_sleep(time::Duration::from_millis(1000)).await;
     {
         let mut block_number = highest_block.lock().unwrap();
         *block_number = Some(10);
     }
+    tx.send(Ok(UIMessage::Refresh())).unwrap();
     debug!("updated block number");
 
     let block_number_opt = provider.get_block_number().await;
@@ -154,4 +202,5 @@ async fn run_networking<T: JsonRpcClient>(provider: Provider<T>, highest_block: 
             *block_number = Some(number.low_u32());
         }
     }
+    tx.send(Ok(UIMessage::Refresh())).unwrap();
 }

@@ -2,6 +2,7 @@ extern crate simple_error;
 
 mod tail_blocks;
 mod tui;
+mod util;
 
 use ansi_term::Style as AnsiStyle;
 use clap::{App, Arg, SubCommand};
@@ -30,7 +31,7 @@ enum TypedProvider {
 async fn new_provider(url: String) -> Result<TypedProvider, Box<dyn Error>> {
     if url.starts_with("http") {
         Ok(TypedProvider::Http(Provider::<Http>::try_from(url)?))
-    } else if url.starts_with("wss") {
+    } else if url.starts_with("ws") {
         Ok(TypedProvider::Ws(Provider::<Ws>::connect(url)
             .await?))
     } else {
