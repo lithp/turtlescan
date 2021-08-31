@@ -1,0 +1,11 @@
+appenders:
+        file:
+                kind: file
+                path: "output.log"
+                encoder:
+                        pattern: "{d} - {m}{n}"
+
+root:
+        level: debug
+        appenders:
+                - file
