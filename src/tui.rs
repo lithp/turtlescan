@@ -9,9 +9,9 @@ use tui::backend::TermionBackend;
 use tui::text::{Span, Spans};
 use tui::Terminal;
 
-use tui::layout::{Constraint, Direction, Layout};
+use tui::layout::{Constraint, Direction, Layout, Rect};
 use tui::style::{Color, Modifier, Style};
-use tui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use tui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use std::thread;
 // use std::time;
@@ -90,15 +90,13 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
     // if we need it: prevents us from blocking when we check for more input
     // let mut stdin = termion::async_stdin().keys();
 
-    let mut current_tab: usize = 0;
-
-    let tab_count = 3;
-
     let mut blocks: VecDeque<ArcFetch> = VecDeque::new();
 
     let highest_block: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
     let mut block_list_state = ListState::default();
+
+    let mut configuring_columns: bool = false;
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
@@ -210,9 +208,33 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                 let bold_title =
                     Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
-                let status_line = Paragraph::new("  (q) quit - (c) configure columns")
-                    .block(Block::default().title(bold_title));
+                let status_string = match configuring_columns {
+                    false => "  (q) quit - (c) configure columns",
+                    true => "  (q) quit - (c) close col popup  ",
+                };
+
+                let status_line =
+                    Paragraph::new(status_string).block(Block::default().title(bold_title));
                 f.render_widget(status_line, chunks[1]);
+
+                if configuring_columns {
+                    let popup = Paragraph::new("configuring columns is not yet supported")
+                        .block(Block::default().title("Columns").borders(Borders::ALL))
+                        .wrap(Wrap { trim: true });
+                    let frame_size = f.size();
+                    let (popup_height, popup_width) = (6, 30);
+
+                    let area = Rect {
+                        // TODO: this will crash if the window is too small
+                        x: frame_size.x + (frame_size.width - popup_width) / 2,
+                        y: frame_size.y + (frame_size.height - popup_height) / 2,
+                        width: popup_width,
+                        height: popup_height,
+                    };
+
+                    f.render_widget(Clear, area);
+                    f.render_widget(popup, area);
+                }
             })?;
         }
 
@@ -222,16 +244,11 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
         match input {
             UIMessage::Key(key) => match key {
                 Key::Char('q') => break,
-                Key::Right => {
-                    current_tab = (current_tab + 1) % tab_count;
-                }
-                Key::Left => {
-                    current_tab = match current_tab {
-                        0 => tab_count - 1,
-                        x => (x - 1) % tab_count,
-                    }
-                }
-                _ => (),
+                Key::Char('c') => match configuring_columns {
+                    true => configuring_columns = false,
+                    false => configuring_columns = true,
+                },
+                _ => {}
             },
             UIMessage::Refresh() => {}
         }
