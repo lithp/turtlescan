@@ -142,21 +142,50 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                     blocks.push_back(new_fetch);
                 }
 
-                let block_lines: Vec<ListItem> = blocks
-                    .iter()
-                    .map(|arcfetch| {
-                        let fetch = arcfetch.lock().unwrap();
+                let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
 
-                        use BlockFetch::*;
-                        let formatted = match &*fetch {
-                            Waiting(height) => format!("{} waiting", height),
-                            Started(_) => "started".to_string(),
-                            Completed(block) => util::format_block(block),
-                            // Failed(_) => "failed".to_string(),
-                        };
-                        ListItem::new(Span::raw(formatted))
-                    })
-                    .collect();
+                let header = ListItem::new(Spans::from(vec![
+                    Span::styled(" blk num", underline_style),
+                    Span::raw(" "),
+                    Span::styled("  blk hash  ", underline_style),
+                    Span::raw(" "),
+                    Span::styled(" parent hash", underline_style),
+                    Span::raw(" "),
+                    Span::styled("  coinbase  ", underline_style),
+                    Span::raw(" "),
+                    Span::styled(" gas used", underline_style),
+                    Span::raw(" "),
+                    Span::styled("gas limit", underline_style),
+                    Span::raw(" "),
+                    Span::styled("base fee", underline_style),
+                    Span::raw(" "),
+                    Span::styled("txns", underline_style),
+                    Span::raw(" "),
+                    Span::styled("size", underline_style),
+                ]));
+
+                let block_lines = {
+                    let mut res = vec![header];
+
+                    let mut block_lines: Vec<ListItem> = blocks
+                        .iter()
+                        .map(|arcfetch| {
+                            let fetch = arcfetch.lock().unwrap();
+
+                            use BlockFetch::*;
+                            let formatted = match &*fetch {
+                                Waiting(height) => format!("{} waiting", height),
+                                Started(_) => "started".to_string(),
+                                Completed(block) => util::format_block(block),
+                                // Failed(_) => "failed".to_string(),
+                            };
+                            ListItem::new(Span::raw(formatted))
+                        })
+                        .collect();
+
+                    res.append(&mut block_lines);
+                    res
+                };
 
                 let block_list = List::new(block_lines)
                     .block(Block::default().borders(Borders::ALL).title("Blocks"))
@@ -164,9 +193,9 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                 f.render_stateful_widget(block_list, chunks[0], &mut block_list_state);
 
                 let titles = [
-                            String::from("Blocks"),
-                            String::from("Tab2"),
-                            String::from("Tab3"),
+                    String::from("Blocks"),
+                    String::from("Tab2"),
+                    String::from("Tab3"),
                 ];
 
                 let titles = titles.iter().cloned().map(Spans::from).collect();
