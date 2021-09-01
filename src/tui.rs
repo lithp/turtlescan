@@ -29,6 +29,10 @@ use ethers_core::types::TxHash;
 
 use std::sync::mpsc;
 
+use signal_hook::consts::signal::*;
+use signal_hook::iterator::Signals;
+
+
 /*
  * This has the promise to be a pretty cool TUI but at the moment it's just a demo.
  *
@@ -68,6 +72,17 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
         for key in stdin {
             let mapped = key.map(|k| UIMessage::Key(k));
             keys_tx.send(mapped).unwrap();
+        }
+    });
+
+    let winch_tx = tx.clone();
+    thread::spawn(move || {
+        let mut signals = Signals::new(&[
+            SIGWINCH,
+        ]).unwrap();
+
+        for _signal in signals.forever() {
+            winch_tx.send(Ok(UIMessage::Refresh())).unwrap();
         }
     });
 
