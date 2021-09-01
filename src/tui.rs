@@ -32,7 +32,6 @@ use std::sync::mpsc;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
-
 /*
  * This has the promise to be a pretty cool TUI but at the moment it's just a demo.
  *
@@ -65,6 +64,9 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
 
     let (tx, rx) = mpsc::channel(); // tell the UI thread (this one) what to do
 
+    // doing this in the background saves us from needing to do any kind of select!(),
+    // all the UI thread needs to do is listen on it's channel and all important events
+    // will come in on that channel.
     let keys_tx = tx.clone();
     thread::spawn(move || {
         let stdin = io::stdin().keys();
@@ -75,11 +77,10 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
         }
     });
 
+    // Immediately redraw when the terminal window resizes
     let winch_tx = tx.clone();
     thread::spawn(move || {
-        let mut signals = Signals::new(&[
-            SIGWINCH,
-        ]).unwrap();
+        let mut signals = Signals::new(&[SIGWINCH]).unwrap();
 
         for _signal in signals.forever() {
             winch_tx.send(Ok(UIMessage::Refresh())).unwrap();
@@ -206,10 +207,8 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                     .highlight_style(Style::default().bg(Color::LightGreen));
                 f.render_stateful_widget(block_list, chunks[0], &mut block_list_state);
 
-                let bold_title = Span::styled(
-                    "turtlescan",
-                    Style::default().add_modifier(Modifier::BOLD),
-                );
+                let bold_title =
+                    Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
                 let status_line = Paragraph::new("  (q) quit - (c) configure columns")
                     .block(Block::default().title(bold_title));
