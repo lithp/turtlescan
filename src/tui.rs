@@ -6,13 +6,12 @@ use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 // use tokio::time::sleep as async_sleep;
 use tui::backend::TermionBackend;
-use tui::symbols::DOT;
 use tui::text::{Span, Spans};
 use tui::Terminal;
 
 use tui::layout::{Constraint, Direction, Layout};
 use tui::style::{Color, Modifier, Style};
-use tui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
+use tui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use std::thread;
 // use std::time;
@@ -175,7 +174,7 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                             use BlockFetch::*;
                             let formatted = match &*fetch {
                                 Waiting(height) => format!("{} waiting", height),
-                                Started(_) => "started".to_string(),
+                                Started(height) => format!("{} fetching", height),
                                 Completed(block) => util::format_block(block),
                                 // Failed(_) => "failed".to_string(),
                             };
@@ -192,19 +191,14 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                     .highlight_style(Style::default().bg(Color::LightGreen));
                 f.render_stateful_widget(block_list, chunks[0], &mut block_list_state);
 
-                let titles = [
-                    String::from("Blocks"),
-                    String::from("Tab2"),
-                    String::from("Tab3"),
-                ];
+                let bold_title = Span::styled(
+                    "turtlescan",
+                    Style::default().add_modifier(Modifier::BOLD),
+                );
 
-                let titles = titles.iter().cloned().map(Spans::from).collect();
-                let tabs = Tabs::new(titles)
-                    .block(Block::default().title("Tabs")) // .borders(Borders::ALL))
-                    .select(current_tab)
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-                    .divider(DOT);
-                f.render_widget(tabs, chunks[1]);
+                let status_line = Paragraph::new("  (q) quit - (c) configure columns")
+                    .block(Block::default().title(bold_title));
+                f.render_widget(status_line, chunks[1]);
             })?;
         }
 
