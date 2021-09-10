@@ -12,7 +12,7 @@ use tui::Terminal;
 
 use tui::layout::{Constraint, Direction, Layout, Rect};
 use tui::style::{Color, Modifier, Style};
-use tui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use tui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph /*Wrap*/};
 
 use std::thread;
 // use std::time;
@@ -62,6 +62,72 @@ enum BlockFetch {
 
 type ArcFetch = Arc<Mutex<BlockFetch>>;
 
+struct Column {
+    name: &'static str,
+    width: usize,
+    render: Box<dyn Fn(EthBlock<TxHash>) -> String>,
+}
+
+fn noop_format(_block: EthBlock<TxHash>) -> String {
+    "".to_string()
+}
+
+fn build_columns() -> Vec<Column> {
+    vec![
+        Column {
+            name: "blk num",
+            width: 8,
+            render: Box::new(|block| match block.number {
+                Some(number) => number.to_string(),
+                None => "unknown".to_string(),
+            }),
+        },
+        Column {
+            name: "blk hash",
+            width: 12,
+            render: Box::new(|block| match block.hash {
+                Some(hash) => util::format_block_hash(hash.as_bytes()),
+                None => "unknown".to_string(),
+            }),
+        },
+        Column {
+            name: "parent hash",
+            width: 12,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "coinbase",
+            width: 12,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "gas used",
+            width: 9,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "gas limit",
+            width: 9,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "base fee",
+            width: 8,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "txns",
+            width: 4,
+            render: Box::new(noop_format),
+        },
+        Column {
+            name: "size",
+            width: 6,
+            render: Box::new(noop_format),
+        },
+    ]
+}
+
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
 pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
@@ -103,8 +169,16 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let highest_block: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
     let mut block_list_state = ListState::default();
+    let mut column_list_state = ListState::default();
 
     let mut configuring_columns: bool = false;
+
+    let columns = build_columns();
+    let column_items = vec![
+        ListItem::new(Span::raw("[0] blk num ")),
+        ListItem::new(Span::raw("[1] blk hash")),
+    ];
+    let column_items_len = column_items.len();
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
@@ -164,26 +238,16 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 }
 
                 let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
-
-                let header = ListItem::new(Spans::from(vec![
-                    Span::styled(" blk num", underline_style),
-                    Span::raw(" "),
-                    Span::styled("  blk hash  ", underline_style),
-                    Span::raw(" "),
-                    Span::styled(" parent hash", underline_style),
-                    Span::raw(" "),
-                    Span::styled("  coinbase  ", underline_style),
-                    Span::raw(" "),
-                    Span::styled(" gas used", underline_style),
-                    Span::raw(" "),
-                    Span::styled("gas limit", underline_style),
-                    Span::raw(" "),
-                    Span::styled("base fee", underline_style),
-                    Span::raw(" "),
-                    Span::styled("txns", underline_style),
-                    Span::raw(" "),
-                    Span::styled("size", underline_style),
-                ]));
+                let spans = Spans::from(columns.iter().fold(Vec::new(), |mut accum, column| {
+                    // soon rust iterators will have an intersperse method
+                    if accum.len() != 0 {
+                        accum.push(Span::raw(" "));
+                    }
+                    let filled = format!("{:<width$}", column.name, width = column.width);
+                    accum.push(Span::styled(filled, underline_style));
+                    accum
+                }));
+                let header = ListItem::new(spans);
 
                 let block_lines = {
                     let mut res = vec![header];
@@ -197,6 +261,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             let formatted = match &*fetch {
                                 Waiting(height) => format!("{} waiting", height),
                                 Started(height) => format!("{} fetching", height),
+                                // TODO: format using our column render methods
                                 Completed(block) => util::format_block(block),
                                 // Failed(_) => "failed".to_string(),
                             };
@@ -226,16 +291,16 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 f.render_widget(status_line, chunks[1]);
 
                 if configuring_columns {
-                    let popup = Paragraph::new("configuring columns is not yet supported")
+                    let popup = List::new(column_items.clone())
                         .block(Block::default().title("Columns").borders(Borders::ALL))
-                        .wrap(Wrap { trim: true });
+                        .highlight_style(Style::default().bg(Color::LightGreen));
+
                     let frame_size = f.size();
                     let (popup_height, popup_width) = (6, 30);
-
                     let area = centered_rect(frame_size, popup_height, popup_width);
 
                     f.render_widget(Clear, area);
-                    f.render_widget(popup, area);
+                    f.render_stateful_widget(popup, area, &mut column_list_state);
                 }
             })?;
         }
@@ -246,8 +311,38 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
             UIMessage::Key(key) => match key {
                 Key::Char('q') => break,
                 Key::Char('c') => match configuring_columns {
+                    // this intentionally does not reset column_list_state
                     true => configuring_columns = false,
                     false => configuring_columns = true,
+                },
+                Key::Up => match configuring_columns {
+                    false => (),
+                    true => match column_list_state.selected() {
+                        None => {
+                            column_list_state.select(Some(column_items_len - 1));
+                        }
+                        Some(0) => {
+                            column_list_state.select(Some(column_items_len - 1));
+                        }
+                        Some(i) => {
+                            column_list_state.select(Some(i - 1));
+                        }
+                    },
+                },
+                Key::Down => match configuring_columns {
+                    false => (),
+                    true => match column_list_state.selected() {
+                        None => {
+                            column_list_state.select(Some(0));
+                        }
+                        Some(i) => {
+                            if i >= column_items_len - 1 {
+                                column_list_state.select(Some(0));
+                            } else {
+                                column_list_state.select(Some(i + 1));
+                            }
+                        }
+                    },
                 },
                 _ => {}
             },
