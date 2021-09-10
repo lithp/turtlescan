@@ -28,6 +28,7 @@ use ethers_core::types::Block as EthBlock;
 use ethers_core::types::TxHash;
 
 use std::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
@@ -65,7 +66,7 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
     let (tx, rx) = mpsc::channel(); // tell the UI thread (this one) what to do
 
     // doing this in the background saves us from needing to do any kind of select!(),
-    // all the UI thread needs to do is listen on it's channel and all important events
+    // all the UI thread needs to do is listen on its channel and all important events
     // will come in on that channel.
     let keys_tx = tx.clone();
     thread::spawn(move || {
@@ -238,7 +239,6 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
             })?;
         }
 
-        // let input = stdin.next();  // blocks until we have more input
         let input = rx.recv().unwrap()?; // blocks until we have more input
 
         match input {
@@ -259,8 +259,8 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
 
 struct BlockFetcher {
     _bg_thread: thread::JoinHandle<()>,
-    network_tx: mpsc::Sender<ArcFetch>, // tell network what to fetch
-                                        // network_rx: mpsc::Receiver<ArcFetch>,
+    network_tx: tokio_mpsc::UnboundedSender<ArcFetch>, // tell network what to fetch
+                                                       // network_rx: mpsc::Receiver<ArcFetch>,
 }
 
 impl BlockFetcher {
@@ -269,10 +269,10 @@ impl BlockFetcher {
         highest_block: Arc<Mutex<Option<u32>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     ) -> BlockFetcher {
-        let (network_tx, network_rx) = mpsc::channel();
+        let (network_tx, mut network_rx) = tokio_mpsc::unbounded_channel();
 
         let handle = thread::spawn(move || {
-            run_networking(provider, highest_block, tx, network_rx);
+            run_networking(provider, highest_block, tx, &mut network_rx);
         });
 
         BlockFetcher {
@@ -287,7 +287,12 @@ impl BlockFetcher {
         let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
 
         let sent_fetch = new_fetch.clone();
-        self.network_tx.send(sent_fetch).unwrap();
+
+        if let Err(_) = self.network_tx.send(sent_fetch) {
+            // TODO(2021-09-09): fetch() should return a Result
+            // Can't use expect() or unwrap() b/c SendError does not implement Debug
+            panic!("remote end closed?");
+        }
 
         new_fetch
     }
@@ -298,7 +303,7 @@ async fn run_networking<T: JsonRpcClient>(
     provider: Provider<T>,
     highest_block: Arc<Mutex<Option<u32>>>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-    network_rx: mpsc::Receiver<ArcFetch>,
+    network_rx: &mut tokio_mpsc::UnboundedReceiver<ArcFetch>,
 ) {
     debug!("started networking thread");
     let block_number_opt = provider.get_block_number().await;
@@ -314,7 +319,7 @@ async fn run_networking<T: JsonRpcClient>(
 
     loop {
         // we're blocking from inside a coro but atm we're the only coro in this reactor
-        let arc_fetch = network_rx.recv().unwrap(); // blocks until we have more input
+        let arc_fetch = network_rx.recv().await.unwrap(); // blocks until we have more input
 
         let block_number = {
             let mut fetch = arc_fetch.lock().unwrap();
