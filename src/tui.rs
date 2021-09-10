@@ -354,6 +354,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
         match input {
             UIMessage::Key(key) => match key {
                 Key::Char('q') => break,
+                Key::Esc => break,
                 Key::Ctrl('c') => break,
                 Key::Char('c') => match configuring_columns {
                     // this intentionally does not reset column_list_state
