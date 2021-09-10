@@ -322,16 +322,18 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 if configuring_columns {
                     let column_items: Vec<ListItem> = columns
                         .iter()
-                        .enumerate()
-                        .map(|(i, col)| {
-                            let s = if col.enabled {
-                                format!("[{}] {}", i, col.name)
+                        .fold((Vec::new(), 0), |(mut result, count), col| {
+                            if col.enabled {
+                                let s = format!("[{}] {}", count, col.name);
+                                result.push(ListItem::new(Span::raw(s)));
+                                (result, count + 1)
                             } else {
-                                format!("[ ] {}", col.name)
-                            };
-                            ListItem::new(Span::raw(s))
+                                let s = format!("[ ] {}", col.name);
+                                result.push(ListItem::new(Span::raw(s)));
+                                (result, count)
+                            }
                         })
-                        .collect();
+                        .0;
 
                     let popup = List::new(column_items.clone())
                         .block(Block::default().title("Columns").borders(Borders::ALL))
