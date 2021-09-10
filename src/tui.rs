@@ -312,7 +312,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
                 let status_string = match configuring_columns {
                     false => "  (q) quit - (c) configure columns",
-                    true => "  (c) close col popup (space) toggle column (↑/↓) choose column",
+                    true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
                 };
 
                 let status_line =
