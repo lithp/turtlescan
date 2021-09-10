@@ -23,7 +23,7 @@ pub fn format_block_hash(hash: &[u8]) -> String {
     result
 }
 
-fn humanize_u256(number: U256) -> String {
+pub fn humanize_u256(number: U256) -> String {
     //TODO: lol this code
 
     if number < U256::from(1000) {

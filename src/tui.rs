@@ -65,14 +65,11 @@ type ArcFetch = Arc<Mutex<BlockFetch>>;
 struct Column {
     name: &'static str,
     width: usize,
-    render: Box<dyn Fn(EthBlock<TxHash>) -> String>,
-}
-
-fn noop_format(_block: EthBlock<TxHash>) -> String {
-    "".to_string()
+    render: Box<dyn Fn(&EthBlock<TxHash>) -> String>,
 }
 
 fn build_columns() -> Vec<Column> {
+    // TODO(2021-09-09) also include the block timestamp
     vec![
         Column {
             name: "blk num",
@@ -93,39 +90,58 @@ fn build_columns() -> Vec<Column> {
         Column {
             name: "parent hash",
             width: 12,
-            render: Box::new(noop_format),
+            render: Box::new(|block| util::format_block_hash(block.parent_hash.as_bytes())),
         },
         Column {
             name: "coinbase",
             width: 12,
-            render: Box::new(noop_format),
+            render: Box::new(|block| util::format_block_hash(block.author.as_bytes())),
         },
         Column {
             name: "gas used",
             width: 9,
-            render: Box::new(noop_format),
+            render: Box::new(|block| block.gas_used.to_string()),
         },
         Column {
             name: "gas limit",
             width: 9,
-            render: Box::new(noop_format),
+            render: Box::new(|block| block.gas_limit.to_string()),
         },
         Column {
             name: "base fee",
             width: 8,
-            render: Box::new(noop_format),
+            render: Box::new(|block| {
+                let base_fee = block.base_fee_per_gas.expect("block has no base fee");
+                util::humanize_u256(base_fee)
+            }),
         },
         Column {
             name: "txns",
             width: 4,
-            render: Box::new(noop_format),
+            render: Box::new(|block| block.transactions.len().to_string()),
         },
         Column {
             name: "size",
             width: 6,
-            render: Box::new(noop_format),
+            render: Box::new(|block| match block.size {
+                Some(size) => size.to_string(),
+                None => "none".to_string(), // blocks from eth_subscribe have no size
+            }),
         },
     ]
+}
+
+fn render_block(columns: &Vec<Column>, block: &EthBlock<TxHash>) -> String {
+    columns.iter().fold(String::new(), |mut accum, column| {
+        if accum.len() != 0 {
+            accum.push_str(" ");
+        }
+        let rendered = (column.render)(block);
+        let filled = format!("{:>width$}", rendered, width = column.width);
+
+        accum.push_str(&filled);
+        accum
+    })
 }
 
 // TODO(2021-08-27) why does the following line not work?
@@ -262,7 +278,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                 Waiting(height) => format!("{} waiting", height),
                                 Started(height) => format!("{} fetching", height),
                                 // TODO: format using our column render methods
-                                Completed(block) => util::format_block(block),
+                                // Completed(block) => util::format_block(block),
+                                Completed(block) => render_block(&columns, block),
                                 // Failed(_) => "failed".to_string(),
                             };
                             ListItem::new(Span::raw(formatted))
