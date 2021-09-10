@@ -198,6 +198,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let highest_block: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
     let mut block_list_state = ListState::default();
+    let mut block_list_height: Option<u16> = None;
+
     let mut column_list_state = ListState::default();
 
     let mut configuring_columns: bool = false;
@@ -306,6 +308,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     .block(Block::default().borders(Borders::ALL).title("Blocks"))
                     .highlight_style(Style::default().bg(Color::LightGreen));
                 f.render_stateful_widget(block_list, chunks[0], &mut block_list_state);
+                block_list_height = Some(chunks[0].height);
 
                 let bold_title =
                     Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
@@ -362,7 +365,22 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     false => configuring_columns = true,
                 },
                 Key::Up => match configuring_columns {
-                    false => (),
+                    false => {
+                        if let Some(height) = block_list_height {
+                            match block_list_state.selected() {
+                                None => {
+                                    block_list_state.select(Some((height - 2).into()));
+                                }
+                                Some(i) => {
+                                    if i <= 1 {
+                                        block_list_state.select(Some((height - 2).into()));
+                                    } else {
+                                        block_list_state.select(Some(i - 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     true => match column_list_state.selected() {
                         None => {
                             column_list_state.select(Some(column_items_len - 1));
@@ -376,7 +394,21 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     },
                 },
                 Key::Down => match configuring_columns {
-                    false => (),
+                    false => match block_list_state.selected() {
+                        None => {
+                            // 0 is the header, we start selecting at 1
+                            block_list_state.select(Some(1));
+                        }
+                        Some(i) => {
+                            if let Some(height) = block_list_height {
+                                if i >= (height - 2).into() {
+                                    block_list_state.select(Some(1));
+                                } else {
+                                    block_list_state.select(Some(i + 1));
+                                }
+                            }
+                        }
+                    },
                     true => match column_list_state.selected() {
                         None => {
                             column_list_state.select(Some(0));
