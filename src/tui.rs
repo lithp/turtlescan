@@ -190,10 +190,14 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let mut configuring_columns: bool = false;
 
     let columns = build_columns();
-    let column_items = vec![
-        ListItem::new(Span::raw("[0] blk num ")),
-        ListItem::new(Span::raw("[1] blk hash")),
-    ];
+    let column_items: Vec<ListItem> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, col)| {
+            let s = format!("[{}] {}", i, col.name);
+            ListItem::new(Span::raw(s))
+        })
+        .collect();
     let column_items_len = column_items.len();
 
     // let's do some networking in the background
@@ -313,7 +317,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         .highlight_style(Style::default().bg(Color::LightGreen));
 
                     let frame_size = f.size();
-                    let (popup_height, popup_width) = (6, 30);
+                    let (popup_height, popup_width) = (10, 30);
                     let area = centered_rect(frame_size, popup_height, popup_width);
 
                     f.render_widget(Clear, area);
