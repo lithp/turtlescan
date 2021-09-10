@@ -65,10 +65,11 @@ type ArcFetch = Arc<Mutex<BlockFetch>>;
 struct Column {
     name: &'static str,
     width: usize,
+    enabled: bool,
     render: Box<dyn Fn(&EthBlock<TxHash>) -> String>,
 }
 
-fn build_columns() -> Vec<Column> {
+fn default_columns() -> Vec<Column> {
     // TODO(2021-09-09) also include the block timestamp
     vec![
         Column {
@@ -78,6 +79,7 @@ fn build_columns() -> Vec<Column> {
                 Some(number) => number.to_string(),
                 None => "unknown".to_string(),
             }),
+            enabled: true,
         },
         Column {
             name: "blk hash",
@@ -86,26 +88,31 @@ fn build_columns() -> Vec<Column> {
                 Some(hash) => util::format_block_hash(hash.as_bytes()),
                 None => "unknown".to_string(),
             }),
+            enabled: true,
         },
         Column {
             name: "parent hash",
             width: 12,
             render: Box::new(|block| util::format_block_hash(block.parent_hash.as_bytes())),
+            enabled: true,
         },
         Column {
             name: "coinbase",
             width: 12,
             render: Box::new(|block| util::format_block_hash(block.author.as_bytes())),
+            enabled: true,
         },
         Column {
             name: "gas used",
             width: 9,
             render: Box::new(|block| block.gas_used.to_string()),
+            enabled: true,
         },
         Column {
             name: "gas limit",
             width: 9,
             render: Box::new(|block| block.gas_limit.to_string()),
+            enabled: true,
         },
         Column {
             name: "base fee",
@@ -114,11 +121,13 @@ fn build_columns() -> Vec<Column> {
                 let base_fee = block.base_fee_per_gas.expect("block has no base fee");
                 util::humanize_u256(base_fee)
             }),
+            enabled: true,
         },
         Column {
             name: "txns",
             width: 4,
             render: Box::new(|block| block.transactions.len().to_string()),
+            enabled: true,
         },
         Column {
             name: "size",
@@ -127,21 +136,25 @@ fn build_columns() -> Vec<Column> {
                 Some(size) => size.to_string(),
                 None => "none".to_string(), // blocks from eth_subscribe have no size
             }),
+            enabled: true,
         },
     ]
 }
 
 fn render_block(columns: &Vec<Column>, block: &EthBlock<TxHash>) -> String {
-    columns.iter().fold(String::new(), |mut accum, column| {
-        if accum.len() != 0 {
-            accum.push_str(" ");
-        }
-        let rendered = (column.render)(block);
-        let filled = format!("{:>width$}", rendered, width = column.width);
+    columns
+        .iter()
+        .filter(|col| col.enabled)
+        .fold(String::new(), |mut accum, column| {
+            if accum.len() != 0 {
+                accum.push_str(" ");
+            }
+            let rendered = (column.render)(block);
+            let filled = format!("{:>width$}", rendered, width = column.width);
 
-        accum.push_str(&filled);
-        accum
-    })
+            accum.push_str(&filled);
+            accum
+        })
 }
 
 // TODO(2021-08-27) why does the following line not work?
@@ -189,16 +202,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
     let mut configuring_columns: bool = false;
 
-    let columns = build_columns();
-    let column_items: Vec<ListItem> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, col)| {
-            let s = format!("[{}] {}", i, col.name);
-            ListItem::new(Span::raw(s))
-        })
-        .collect();
-    let column_items_len = column_items.len();
+    let mut columns = default_columns();
+    let column_items_len = columns.len();
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
@@ -258,15 +263,18 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 }
 
                 let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
-                let spans = Spans::from(columns.iter().fold(Vec::new(), |mut accum, column| {
-                    // soon rust iterators will have an intersperse method
-                    if accum.len() != 0 {
-                        accum.push(Span::raw(" "));
-                    }
-                    let filled = format!("{:<width$}", column.name, width = column.width);
-                    accum.push(Span::styled(filled, underline_style));
-                    accum
-                }));
+                let spans = Spans::from(columns.iter().filter(|col| col.enabled).fold(
+                    Vec::new(),
+                    |mut accum, column| {
+                        // soon rust iterators will have an intersperse method
+                        if accum.len() != 0 {
+                            accum.push(Span::raw(" "));
+                        }
+                        let filled = format!("{:<width$}", column.name, width = column.width);
+                        accum.push(Span::styled(filled, underline_style));
+                        accum
+                    },
+                ));
                 let header = ListItem::new(spans);
 
                 let block_lines = {
@@ -312,12 +320,25 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 f.render_widget(status_line, chunks[1]);
 
                 if configuring_columns {
+                    let column_items: Vec<ListItem> = columns
+                        .iter()
+                        .enumerate()
+                        .map(|(i, col)| {
+                            let s = if col.enabled {
+                                format!("[{}] {}", i, col.name)
+                            } else {
+                                format!("[ ] {}", col.name)
+                            };
+                            ListItem::new(Span::raw(s))
+                        })
+                        .collect();
+
                     let popup = List::new(column_items.clone())
                         .block(Block::default().title("Columns").borders(Borders::ALL))
                         .highlight_style(Style::default().bg(Color::LightGreen));
 
                     let frame_size = f.size();
-                    let (popup_height, popup_width) = (10, 30);
+                    let (popup_height, popup_width) = (15, 30);
                     let area = centered_rect(frame_size, popup_height, popup_width);
 
                     f.render_widget(Clear, area);
@@ -364,6 +385,14 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             }
                         }
                     },
+                },
+                Key::Char(' ') => match configuring_columns {
+                    false => (),
+                    true => {
+                        if let Some(i) = column_list_state.selected() {
+                            columns[i].enabled = !columns[i].enabled;
+                        }
+                    }
                 },
                 _ => {}
             },
