@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             match typed_provider {
                 TypedProvider::Ws(provider) => tui::run_tui(provider),
-                TypedProvider::Http(provider) => tui::run_tui(provider),
+                TypedProvider::Http(_) => bail!("tui requires connecting via websocket"),
             }
         }
         _ => {

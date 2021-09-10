@@ -83,6 +83,8 @@ pub fn format_block(block: &EthBlock<TxHash>) -> String {
     write!(result, " {:>9}", &block.gas_limit.to_string()).expect("oops");
 
     //TODO(2021-08-30) not all blocks are london blocks
+    // this is also empty if we were given a block by subscribe_blocks(). In order to
+    //   populate these fields we need to do another round trip to fetch the block
     let base_fee = block.base_fee_per_gas.unwrap();
     let base_fee_fmt = humanize_u256(base_fee);
     write!(result, " {:>8}", &base_fee_fmt).expect("oops");

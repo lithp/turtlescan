@@ -16,7 +16,7 @@ use tui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, 
 use std::thread;
 // use std::time;
 
-use ethers_providers::{JsonRpcClient, Middleware, Provider};
+use ethers_providers::{JsonRpcClient, Middleware, Provider, Ws};
 use log::debug;
 use std::error::Error;
 use termion::event::Key;
@@ -41,9 +41,15 @@ use signal_hook::iterator::Signals;
  */
 
 enum UIMessage {
-    // a message sent to the UI
+    // the user has given us some input over stdin
     Key(termion::event::Key),
+
+    // something in the background has updated state and wants the UI to rerender
     Refresh(),
+
+    // networking has noticed a new block and wants the UI to show it
+    // TODO(2021-09-09) we really only need the block number
+    NewBlock(EthBlock<TxHash>),
 }
 
 enum BlockFetch {
@@ -57,7 +63,7 @@ type ArcFetch = Arc<Mutex<BlockFetch>>;
 
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
-pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), Box<dyn Error>> {
+pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
@@ -251,6 +257,21 @@ pub fn run_tui<T: JsonRpcClient + 'static>(provider: Provider<T>) -> Result<(), 
                 _ => {}
             },
             UIMessage::Refresh() => {}
+            UIMessage::NewBlock(block) => {
+                debug!("UI received new block {}", block.number.unwrap());
+
+                // we cannot add this block directly because it is missing a bunch of
+                // fields that we would like to render so instead we add a placeholder and
+                // ask the networking thread to give us a better block
+                // let new_fetch = Arc::new(Mutex::new(BlockFetch::Completed(block)));
+
+                // TODO(2021-09-09) this is not necessarily a brand new block
+                //                  there could have been a reorg, and it's possible
+                //                  this block is replacing a previous one. we should
+                //                  insert this block fetch into the correct location
+                let new_fetch = block_fetcher.fetch(block.number.unwrap().low_u32());
+                blocks.push_front(new_fetch);
+            }
         }
     }
 
@@ -264,8 +285,8 @@ struct BlockFetcher {
 }
 
 impl BlockFetcher {
-    fn start<T: JsonRpcClient + 'static>(
-        provider: Provider<T>,
+    fn start(
+        provider: Provider<Ws>, // Ws is required because we watch for new blocks
         highest_block: Arc<Mutex<Option<u32>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     ) -> BlockFetcher {
@@ -299,8 +320,8 @@ impl BlockFetcher {
 }
 
 #[tokio::main(worker_threads = 1)]
-async fn run_networking<T: JsonRpcClient>(
-    provider: Provider<T>,
+async fn run_networking(
+    provider: Provider<Ws>, // Ws is required because we watch for new blocks
     highest_block: Arc<Mutex<Option<u32>>>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     network_rx: &mut tokio_mpsc::UnboundedReceiver<ArcFetch>,
@@ -317,11 +338,25 @@ async fn run_networking<T: JsonRpcClient>(
     tx.send(Ok(UIMessage::Refresh())).unwrap();
     debug!("updated block number");
 
+    let loop_tx = tx.clone();
+    let loop_fut = loop_on_network_commands(&provider, loop_tx, network_rx);
+
+    let watch_fut = watch_new_blocks(&provider, tx);
+
+    tokio::join!(loop_fut, watch_fut); // neither will exit so this should block forever
+}
+
+async fn loop_on_network_commands<T: JsonRpcClient>(
+    provider: &Provider<T>,
+    tx: mpsc::Sender<Result<UIMessage, io::Error>>,
+    network_rx: &mut tokio_mpsc::UnboundedReceiver<ArcFetch>,
+) {
     loop {
-        // we're blocking from inside a coro but atm we're the only coro in this reactor
         let arc_fetch = network_rx.recv().await.unwrap(); // blocks until we have more input
 
         let block_number = {
+            // we're blocking the thread but these critical sections are kept as short as
+            // possible (here and elsewhere in the program)
             let mut fetch = arc_fetch.lock().unwrap();
 
             if let BlockFetch::Waiting(block_number) = *fetch {
@@ -342,5 +377,15 @@ async fn run_networking<T: JsonRpcClient>(
             *fetch = BlockFetch::Completed(complete_block);
         }
         tx.send(Ok(UIMessage::Refresh())).unwrap();
+    }
+}
+
+use ethers_providers::StreamExt;
+
+async fn watch_new_blocks(provider: &Provider<Ws>, tx: mpsc::Sender<Result<UIMessage, io::Error>>) {
+    let mut stream = provider.subscribe_blocks().await.unwrap();
+    while let Some(block) = stream.next().await {
+        debug!("new block {}", block.number.unwrap());
+        tx.send(Ok(UIMessage::NewBlock(block))).unwrap();
     }
 }
