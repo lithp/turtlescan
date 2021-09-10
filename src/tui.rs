@@ -369,11 +369,11 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         if let Some(height) = block_list_height {
                             match block_list_state.selected() {
                                 None => {
-                                    block_list_state.select(Some((height - 2).into()));
+                                    block_list_state.select(Some((height - 3).into()));
                                 }
                                 Some(i) => {
                                     if i <= 1 {
-                                        block_list_state.select(Some((height - 2).into()));
+                                        block_list_state.select(Some((height - 3).into()));
                                     } else {
                                         block_list_state.select(Some(i - 1));
                                     }
@@ -401,7 +401,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         }
                         Some(i) => {
                             if let Some(height) = block_list_height {
-                                if i >= (height - 2).into() {
+                                if i >= (height - 3).into() {
                                     block_list_state.select(Some(1));
                                 } else {
                                     block_list_state.select(Some(i + 1));
