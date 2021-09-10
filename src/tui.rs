@@ -1,5 +1,6 @@
 use crate::util;
 
+use std::cmp;
 use std::io;
 use std::sync::{Arc, Mutex};
 use termion::raw::IntoRawMode;
@@ -231,13 +232,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     let frame_size = f.size();
                     let (popup_height, popup_width) = (6, 30);
 
-                    let area = Rect {
-                        // TODO: this will crash if the window is too small
-                        x: frame_size.x + (frame_size.width - popup_width) / 2,
-                        y: frame_size.y + (frame_size.height - popup_height) / 2,
-                        width: popup_width,
-                        height: popup_height,
-                    };
+                    let area = centered_rect(frame_size, popup_height, popup_width);
 
                     f.render_widget(Clear, area);
                     f.render_widget(popup, area);
@@ -387,5 +382,17 @@ async fn watch_new_blocks(provider: &Provider<Ws>, tx: mpsc::Sender<Result<UIMes
     while let Some(block) = stream.next().await {
         debug!("new block {}", block.number.unwrap());
         tx.send(Ok(UIMessage::NewBlock(block))).unwrap();
+    }
+}
+
+fn centered_rect(frame_size: Rect, desired_height: u16, desired_width: u16) -> Rect {
+    let height = cmp::min(desired_height, frame_size.height);
+    let width = cmp::min(desired_width, frame_size.width);
+
+    Rect {
+        x: frame_size.x + (frame_size.width - width) / 2,
+        y: frame_size.y + (frame_size.height - height) / 2,
+        width: width,
+        height: height,
     }
 }
