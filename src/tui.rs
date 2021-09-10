@@ -34,13 +34,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
-/*
- * This has the promise to be a pretty cool TUI but at the moment it's just a demo.
- *
- * Currently it is a very complicated and unintuitive way to fetch the current block
- * number from infura.
- */
-
 enum UIMessage {
     // the user has given us some input over stdin
     Key(termion::event::Key),
@@ -203,6 +196,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let mut column_list_state = ListState::default();
 
     let mut configuring_columns: bool = false;
+    let mut showing_transactions: bool = false;
 
     let mut columns = default_columns();
     let column_items_len = columns.len();
@@ -233,13 +227,18 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
             })?;
         } else {
             terminal.draw(|f| {
-                let chunks = Layout::default()
+                let vert_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .margin(1)
                     .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref())
                     .split(f.size());
 
-                let target_height = chunks[0].height;
+                let horiz_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(vert_chunks[0]);
+
+                let target_height = vert_chunks[0].height;
                 let target_height = {
                     // the border consumes 2 lines
                     // TODO: this really should be 3, we also need a header to label the
@@ -304,11 +303,24 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     res
                 };
 
+                let block_list_chunk = if showing_transactions {
+                    horiz_chunks[0]
+                } else {
+                    vert_chunks[0]
+                };
+
                 let block_list = List::new(block_lines)
                     .block(Block::default().borders(Borders::ALL).title("Blocks"))
                     .highlight_style(Style::default().bg(Color::LightGreen));
-                f.render_stateful_widget(block_list, chunks[0], &mut block_list_state);
-                block_list_height = Some(chunks[0].height);
+                f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
+                block_list_height = Some(vert_chunks[0].height);
+
+                let txn_list = List::new(Vec::new())
+                    .block(Block::default().borders(Borders::ALL).title("Transactions"));
+
+                if showing_transactions {
+                    f.render_widget(txn_list, horiz_chunks[1]);
+                }
 
                 let bold_title =
                     Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
@@ -320,7 +332,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
                 let status_line =
                     Paragraph::new(status_string).block(Block::default().title(bold_title));
-                f.render_widget(status_line, chunks[1]);
+                f.render_widget(status_line, vert_chunks[1]);
 
                 if configuring_columns {
                     let column_items: Vec<ListItem> = columns
@@ -364,6 +376,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     true => configuring_columns = false,
                     false => configuring_columns = true,
                 },
+                Key::Char('t') => showing_transactions = !showing_transactions,
                 Key::Up => match configuring_columns {
                     false => {
                         if let Some(height) = block_list_height {
