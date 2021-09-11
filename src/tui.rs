@@ -245,6 +245,12 @@ fn block_to_txn_list_items<'a>(block: &'a EthBlock<Transaction>) -> Vec<ListItem
         .collect();
     res.append(&mut txn_lines);
 
+    if txn_lines.len() == 0 {
+        res.push(
+            ListItem::new(Span::raw("this block has no transactions"))
+        )
+    }
+
     res
 }
 
@@ -469,7 +475,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
                 let status_string = match configuring_columns {
-                    false => "  (q) quit - (c) configure columns",
+                    false => "  (q) quit - (c) configure columns - (t) toggle transactions view",
                     true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
                 };
 
