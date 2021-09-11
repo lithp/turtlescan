@@ -23,9 +23,10 @@ use std::error::Error;
 use termion::event::Key;
 use termion::input::TermRead;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use ethers_core::types::Block as EthBlock;
+use ethers_core::types::Transaction;
 use ethers_core::types::TxHash;
 
 use std::sync::mpsc;
@@ -46,23 +47,73 @@ enum UIMessage {
     NewBlock(EthBlock<TxHash>),
 }
 
-enum BlockFetch {
+enum BlockFetch<T> {
     Waiting(u32),
     Started(u32),
-    Completed(EthBlock<TxHash>),
+    Completed(EthBlock<T>),
     // Failed(io::Error),
 }
 
-type ArcFetch = Arc<Mutex<BlockFetch>>;
+// TODO: is there a way to drop this redundency?
+type ArcFetch = Arc<Mutex<BlockFetch<TxHash>>>;
+type ArcFetchTxns = Arc<Mutex<BlockFetch<Transaction>>>;
 
-struct Column {
+// TODO: I think these layers are in the wrong order
+enum NetworkRequest {
+    Block(ArcFetch),
+    BlockWithTxns(ArcFetchTxns),
+}
+
+struct Column<T> {
     name: &'static str,
     width: usize,
     enabled: bool,
-    render: Box<dyn Fn(&EthBlock<TxHash>) -> String>,
+    render: Box<dyn Fn(&T) -> String>,
 }
 
-fn default_columns() -> Vec<Column> {
+fn txn_columns() -> Vec<Column<Transaction>> {
+    vec![
+        Column {
+            name: "idx",
+            width: 3,
+            render: Box::new(|txn| match txn.transaction_index {
+                None => "???".to_string(),
+                Some(i) => i.to_string(),
+            }),
+            enabled: true,
+        },
+        Column {
+            name: "hash",
+            width: 12,
+            render: Box::new(|txn| util::format_block_hash(txn.hash.as_bytes())),
+            enabled: true,
+        },
+        Column {
+            name: "from",
+            width: 12,
+            render: Box::new(|txn| util::format_block_hash(txn.from.as_bytes())),
+            enabled: true,
+        },
+        Column {
+            name: "to",
+            width: 12,
+            render: Box::new(|txn| match txn.to {
+                None => "".to_string(), // e.g. contract creation
+                Some(addr) => util::format_block_hash(addr.as_bytes()),
+            }),
+            enabled: true,
+        },
+        // more cols:
+        //   nonce: U256
+        //   value: U256
+        //   gas_price: Option<U256>,
+        //   input: Bytes,
+        //   max_priority_fee_per_gas: Option<U256>
+        //   max_fee_per_gas: Option<U256
+    ]
+}
+
+fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
     // TODO(2021-09-09) also include the block timestamp
     vec![
         Column {
@@ -134,7 +185,7 @@ fn default_columns() -> Vec<Column> {
     ]
 }
 
-fn render_block(columns: &Vec<Column>, block: &EthBlock<TxHash>) -> String {
+fn render_block(columns: &Vec<Column<EthBlock<TxHash>>>, block: &EthBlock<TxHash>) -> String {
     columns
         .iter()
         .filter(|col| col.enabled)
@@ -148,6 +199,53 @@ fn render_block(columns: &Vec<Column>, block: &EthBlock<TxHash>) -> String {
             accum.push_str(&filled);
             accum
         })
+}
+
+fn block_to_txn_list_items<'a>(block: &'a EthBlock<Transaction>) -> Vec<ListItem<'static>> {
+    // add a header?
+
+    // TODO: code duplication
+    let columns = txn_columns();
+    let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
+    let spans = Spans::from(columns.iter().filter(|col| col.enabled).fold(
+        Vec::new(),
+        |mut accum, column| {
+            // soon rust iterators will have an intersperse method
+            if accum.len() != 0 {
+                accum.push(Span::raw(" "));
+            }
+            let filled = format!("{:<width$}", column.name, width = column.width);
+            accum.push(Span::styled(filled, underline_style));
+            accum
+        },
+    ));
+    let header = ListItem::new(spans);
+
+    let mut res = vec![header];
+
+    let mut txn_lines: Vec<ListItem> = block
+        .transactions
+        .iter()
+        .map(|txn| {
+            let formatted = columns.iter().filter(|col| col.enabled).fold(
+                String::new(),
+                |mut accum, column| {
+                    if accum.len() != 0 {
+                        accum.push_str(" ");
+                    }
+                    let rendered = (column.render)(txn);
+                    let filled = format!("{:>width$}", rendered, width = column.width);
+
+                    accum.push_str(&filled);
+                    accum
+                },
+            );
+            ListItem::new(Span::raw(formatted))
+        })
+        .collect();
+    res.append(&mut txn_lines);
+
+    res
 }
 
 // TODO(2021-08-27) why does the following line not work?
@@ -188,6 +286,9 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
     let mut blocks: VecDeque<ArcFetch> = VecDeque::new();
 
+    // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
+    let mut blocks_to_txns: HashMap<u32, ArcFetchTxns> = HashMap::new();
+
     let highest_block: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
     let mut block_list_state = ListState::default();
@@ -205,7 +306,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     // no real need to hold onto this handle, the thread will be killed when this main
     // thread exits.
     let highest_block_clone = highest_block.clone();
-    let block_fetcher = BlockFetcher::start(provider, highest_block_clone, tx);
+    let block_fetcher = Networking::start(provider, highest_block_clone, tx);
 
     loop {
         let waiting_for_initial_block = {
@@ -256,7 +357,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         let block_number_opt = highest_block.lock().unwrap();
                         block_number_opt.unwrap()
                     };
-                    let new_fetch = block_fetcher.fetch(
+                    let new_fetch = block_fetcher.fetch_block(
                         // TODO: if the chain is very young this could underflow
                         highest_block_number - blocks.len() as u32,
                     );
@@ -290,10 +391,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             let formatted = match &*fetch {
                                 Waiting(height) => format!("{} waiting", height),
                                 Started(height) => format!("{} fetching", height),
-                                // TODO: format using our column render methods
-                                // Completed(block) => util::format_block(block),
                                 Completed(block) => render_block(&columns, block),
-                                // Failed(_) => "failed".to_string(),
                             };
                             ListItem::new(Span::raw(formatted))
                         })
@@ -315,10 +413,55 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
                 block_list_height = Some(vert_chunks[0].height);
 
-                let txn_list = List::new(Vec::new())
-                    .block(Block::default().borders(Borders::ALL).title("Transactions"));
-
                 if showing_transactions {
+                    let txn_items = if let Some(offset) = block_list_state.selected() {
+                        let offset = offset - 1; // skip the header
+                        let highest_block_number = {
+                            let block_number_opt = highest_block.lock().unwrap();
+                            block_number_opt.unwrap()
+                        };
+                        let block_at_offset = highest_block_number - (offset as u32);
+
+                        let arcfetch = match blocks_to_txns.get(&block_at_offset) {
+                            None => {
+                                let new_fetch =
+                                    block_fetcher.fetch_block_with_txns(block_at_offset);
+                                debug!("fired new request for block {}", block_at_offset);
+                                blocks_to_txns.insert(block_at_offset, new_fetch);
+
+                                blocks_to_txns.get(&block_at_offset).unwrap()
+                            }
+                            Some(arcfetch) => arcfetch,
+                        };
+
+                        {
+                            let mut fetch = arcfetch.lock().unwrap();
+
+                            // TODO: call block_to_txn_list_items when not inside a critical
+                            // section. This is low priority, because by the time we're calling
+                            // block_to_txn_list_items we're the only thread trying to
+                            // access this block, we only have it because the networking
+                            // thread has finished.
+
+                            use BlockFetch::*;
+                            match &mut *fetch {
+                                Waiting(height) => {
+                                    vec![ListItem::new(Span::raw(format!("{} waiting", height)))]
+                                }
+                                Started(height) => {
+                                    vec![ListItem::new(Span::raw(format!("{} fetching", height)))]
+                                }
+                                // TODO: render transactions!
+                                // Completed(block) => vec![ListItem::new(Span::raw(format!("completed")))],
+                                Completed(block) => block_to_txn_list_items(&block),
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    let txn_list = List::new(txn_items)
+                        .block(Block::default().borders(Borders::ALL).title("Transactions"));
                     f.render_widget(txn_list, horiz_chunks[1]);
                 }
 
@@ -458,8 +601,20 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 //                  there could have been a reorg, and it's possible
                 //                  this block is replacing a previous one. we should
                 //                  insert this block fetch into the correct location
-                let new_fetch = block_fetcher.fetch(block.number.unwrap().low_u32());
+                // TODO(2021-09-10) we should also update blocks_to_txns when we detect a
+                //                  reorg
+                let block_num = block.number.unwrap().low_u32();
+                let new_fetch = block_fetcher.fetch_block(block_num);
                 blocks.push_front(new_fetch);
+
+                {
+                    let mut highest_block_number_opt = highest_block.lock().unwrap();
+                    if let Some(highest_block_number) = *highest_block_number_opt {
+                        if block_num > highest_block_number {
+                            *highest_block_number_opt = Some(block_num);
+                        }
+                    }
+                }
             }
         }
     }
@@ -467,25 +622,25 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-struct BlockFetcher {
+struct Networking {
     _bg_thread: thread::JoinHandle<()>,
-    network_tx: tokio_mpsc::UnboundedSender<ArcFetch>, // tell network what to fetch
-                                                       // network_rx: mpsc::Receiver<ArcFetch>,
+    network_tx: tokio_mpsc::UnboundedSender<NetworkRequest>, // tell network what to fetch
+                                                             // network_rx: mpsc::Receiver<ArcFetch>,
 }
 
-impl BlockFetcher {
+impl Networking {
     fn start(
         provider: Provider<Ws>, // Ws is required because we watch for new blocks
         highest_block: Arc<Mutex<Option<u32>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-    ) -> BlockFetcher {
+    ) -> Networking {
         let (network_tx, mut network_rx) = tokio_mpsc::unbounded_channel();
 
         let handle = thread::spawn(move || {
             run_networking(provider, highest_block, tx, &mut network_rx);
         });
 
-        BlockFetcher {
+        Networking {
             _bg_thread: handle,
             network_tx: network_tx,
             // network_rx: network_rx,
@@ -493,13 +648,30 @@ impl BlockFetcher {
     }
 
     // TODO: return error
-    fn fetch(&self, block_number: u32) -> ArcFetch {
+    fn fetch_block(&self, block_number: u32) -> ArcFetch {
         let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
 
         let sent_fetch = new_fetch.clone();
 
-        if let Err(_) = self.network_tx.send(sent_fetch) {
-            // TODO(2021-09-09): fetch() should return a Result
+        if let Err(_) = self.network_tx.send(NetworkRequest::Block(sent_fetch)) {
+            // TODO(2021-09-09): fetch_block() should return a Result
+            // Can't use expect() or unwrap() b/c SendError does not implement Debug
+            panic!("remote end closed?");
+        }
+
+        new_fetch
+    }
+
+    fn fetch_block_with_txns(&self, block_number: u32) -> ArcFetchTxns {
+        let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
+
+        let sent_fetch = new_fetch.clone();
+
+        if let Err(_) = self
+            .network_tx
+            .send(NetworkRequest::BlockWithTxns(sent_fetch))
+        {
+            // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
             panic!("remote end closed?");
         }
@@ -513,7 +685,7 @@ async fn run_networking(
     provider: Provider<Ws>, // Ws is required because we watch for new blocks
     highest_block: Arc<Mutex<Option<u32>>>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-    network_rx: &mut tokio_mpsc::UnboundedReceiver<ArcFetch>,
+    network_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
 ) {
     debug!("started networking thread");
     let block_number_opt = provider.get_block_number().await;
@@ -538,34 +710,67 @@ async fn run_networking(
 async fn loop_on_network_commands<T: JsonRpcClient>(
     provider: &Provider<T>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-    network_rx: &mut tokio_mpsc::UnboundedReceiver<ArcFetch>,
+    network_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
 ) {
     loop {
-        let arc_fetch = network_rx.recv().await.unwrap(); // blocks until we have more input
+        let request = network_rx.recv().await.unwrap(); // blocks until we have more input
 
-        let block_number = {
-            // we're blocking the thread but these critical sections are kept as short as
-            // possible (here and elsewhere in the program)
-            let mut fetch = arc_fetch.lock().unwrap();
+        // TODO(2021-09-10): some gnarly logic duplication
+        match request {
+            NetworkRequest::Block(arc_fetch) => {
+                let block_number = {
+                    // we're blocking the thread but these critical sections are kept as short as
+                    // possible (here and elsewhere in the program)
+                    let mut fetch = arc_fetch.lock().unwrap();
 
-            if let BlockFetch::Waiting(block_number) = *fetch {
-                // tell the UI we're handling this fetch
-                *fetch = BlockFetch::Started(block_number);
+                    if let BlockFetch::Waiting(block_number) = *fetch {
+                        // tell the UI we're handling this fetch
+                        *fetch = BlockFetch::Started(block_number);
 
-                block_number
-            } else {
-                continue;
+                        block_number
+                    } else {
+                        continue;
+                    }
+                } as u64;
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
+
+                let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
+
+                {
+                    let mut fetch = arc_fetch.lock().unwrap();
+                    *fetch = BlockFetch::Completed(complete_block);
+                }
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
-        } as u64;
-        tx.send(Ok(UIMessage::Refresh())).unwrap();
+            NetworkRequest::BlockWithTxns(arc_fetch) => {
+                let block_number = {
+                    let mut fetch = arc_fetch.lock().unwrap();
 
-        let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
+                    if let BlockFetch::Waiting(block_number) = *fetch {
+                        *fetch = BlockFetch::Started(block_number);
 
-        {
-            let mut fetch = arc_fetch.lock().unwrap();
-            *fetch = BlockFetch::Completed(complete_block);
+                        block_number
+                    } else {
+                        continue;
+                    }
+                } as u64;
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
+
+                // the first unwrap is b/c the network request might have failed
+                // the second unwrap is b/c the requested block number might not exist
+                let complete_block = provider
+                    .get_block_with_txs(block_number)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                {
+                    let mut fetch = arc_fetch.lock().unwrap();
+                    *fetch = BlockFetch::Completed(complete_block);
+                }
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
+            }
         }
-        tx.send(Ok(UIMessage::Refresh())).unwrap();
     }
 }
 
