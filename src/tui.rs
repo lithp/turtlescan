@@ -477,7 +477,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             .border_style(Style::default().fg(focused_pane.blocks_border_color()))
                             .title("Blocks"),
                     )
-                    .highlight_style(Style::default().bg(focused_pane.txns_selection_color()));
+                    .highlight_style(Style::default().bg(focused_pane.blocks_selection_color()));
                 f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
                 block_list_height = Some(vert_chunks[0].height);
 
@@ -537,7 +537,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         )
                         // TODO: this should be txns_selection_color()
                         .highlight_style(
-                            Style::default().bg(focused_pane.blocks_selection_color()),
+                            Style::default().bg(focused_pane.txns_selection_color()),
                         );
 
                     f.render_stateful_widget(txn_list, horiz_chunks[1], &mut txn_list_state);
