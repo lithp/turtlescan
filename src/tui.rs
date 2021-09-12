@@ -243,15 +243,59 @@ fn block_to_txn_list_items<'a>(block: &'a EthBlock<Transaction>) -> Vec<ListItem
             ListItem::new(Span::raw(formatted))
         })
         .collect();
-    res.append(&mut txn_lines);
 
     if txn_lines.len() == 0 {
-        res.push(
-            ListItem::new(Span::raw("this block has no transactions"))
-        )
+        res.push(ListItem::new(Span::raw("this block has no transactions")))
     }
 
+    res.append(&mut txn_lines);
+
     res
+}
+
+enum FocusedPane {
+    Blocks(),
+    Transactions(),
+}
+
+impl FocusedPane {
+    fn toggle(self) -> FocusedPane {
+        use FocusedPane::*;
+        match self {
+            Blocks() => Transactions(),
+            Transactions() => Blocks(),
+        }
+    }
+
+    const FOCUSED_BORDER: Color = Color::Gray;
+    const UNFOCUSED_BORDER: Color = Color::DarkGray;
+
+    fn blocks_border_color(&self) -> Color {
+        use FocusedPane::*;
+        match self {
+            Blocks() => FocusedPane::FOCUSED_BORDER,
+            Transactions() => FocusedPane::UNFOCUSED_BORDER,
+        }
+    }
+
+    fn txns_border_color(&self) -> Color {
+        use FocusedPane::*;
+        match self {
+            Blocks() => FocusedPane::UNFOCUSED_BORDER,
+            Transactions() => FocusedPane::FOCUSED_BORDER,
+        }
+    }
+
+    const FOCUSED_SELECTION: Color = Color::LightGreen;
+    const UNFOCUSED_SELECTION: Color = Color::Green;
+
+    fn blocks_selection_color(&self) -> Color {
+        use FocusedPane::*;
+        match self {
+            Blocks() => FocusedPane::FOCUSED_SELECTION,
+            Transactions() => FocusedPane::UNFOCUSED_SELECTION,
+        }
+    }
 }
 
 // TODO(2021-08-27) why does the following line not work?
@@ -302,11 +346,15 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
     let mut column_list_state = ListState::default();
 
+    let mut txn_list_state = ListState::default();
+
     let mut configuring_columns: bool = false;
     let mut showing_transactions: bool = false;
 
     let mut columns = default_columns();
     let column_items_len = columns.len();
+
+    let mut focused_pane = FocusedPane::Blocks();
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
@@ -414,8 +462,13 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 };
 
                 let block_list = List::new(block_lines)
-                    .block(Block::default().borders(Borders::ALL).title("Blocks"))
-                    .highlight_style(Style::default().bg(Color::LightGreen));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(focused_pane.blocks_border_color()))
+                            .title("Blocks"),
+                    )
+                    .highlight_style(Style::default().bg(focused_pane.blocks_selection_color()));
                 f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
                 block_list_height = Some(vert_chunks[0].height);
 
@@ -467,8 +520,18 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     };
 
                     let txn_list = List::new(txn_items)
-                        .block(Block::default().borders(Borders::ALL).title("Transactions"));
-                    f.render_widget(txn_list, horiz_chunks[1]);
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(focused_pane.txns_border_color()))
+                                .title("Transactions"),
+                        )
+                        // TODO: this should be txns_selection_color()
+                        .highlight_style(
+                            Style::default().bg(focused_pane.blocks_selection_color()),
+                        );
+
+                    f.render_stateful_widget(txn_list, horiz_chunks[1], &mut txn_list_state);
                 }
 
                 let bold_title =
@@ -517,32 +580,42 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
         match input {
             UIMessage::Key(key) => match key {
-                Key::Char('q') => break,
-                Key::Esc => break,
-                Key::Ctrl('c') => break,
+                Key::Char('q') | Key::Esc | Key::Ctrl('c') => break,
                 Key::Char('c') => match configuring_columns {
                     // this intentionally does not reset column_list_state
                     true => configuring_columns = false,
                     false => configuring_columns = true,
                 },
-                Key::Char('t') => showing_transactions = !showing_transactions,
+                Key::Char('t') => {
+                    showing_transactions = !showing_transactions;
+                    focused_pane = FocusedPane::Blocks();
+                }
                 Key::Up => match configuring_columns {
-                    false => {
-                        if let Some(height) = block_list_height {
-                            match block_list_state.selected() {
-                                None => {
-                                    block_list_state.select(Some((height - 3).into()));
-                                }
-                                Some(i) => {
-                                    if i <= 1 {
+                    false => match focused_pane {
+                        FocusedPane::Blocks() => {
+                            if let Some(height) = block_list_height {
+                                match block_list_state.selected() {
+                                    None => {
                                         block_list_state.select(Some((height - 3).into()));
-                                    } else {
-                                        block_list_state.select(Some(i - 1));
+                                    }
+                                    Some(i) => {
+                                        if i <= 1 {
+                                            block_list_state.select(Some((height - 3).into()));
+                                        } else {
+                                            block_list_state.select(Some(i - 1));
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
+                        FocusedPane::Transactions() => {
+                            // TODO: what if there are no transactions in this block?
+                            match txn_list_state.selected() {
+                                None => txn_list_state.select(Some(1)),
+                                Some(i) => txn_list_state.select(Some(i + 1)),
+                            }
+                        }
+                    },
                     true => match column_list_state.selected() {
                         None => {
                             column_list_state.select(Some(column_items_len - 1));
@@ -592,7 +665,14 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         }
                     }
                 },
-                _ => {}
+                Key::Char('\t') | Key::BackTab => {
+                    if showing_transactions {
+                        focused_pane = focused_pane.toggle();
+                    }
+                }
+                key => {
+                    debug!("key hit: {:?}", key)
+                }
             },
             UIMessage::Refresh() => {}
             UIMessage::NewBlock(block) => {
