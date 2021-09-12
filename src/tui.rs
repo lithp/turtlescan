@@ -644,6 +644,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             block_list_state.select(Some(1));
                         }
                         Some(i) => {
+                            // NB. this duplicates logic found in  NewBlock(), any changes
+                            //     here likely also need to be applied there
                             if let Some(height) = block_list_height {
                                 if i >= (height - 3).into() {
                                     block_list_state.select(Some(1));
@@ -701,6 +703,23 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 let block_num = block.number.unwrap().low_u32();
                 let new_fetch = block_fetcher.fetch_block(block_num);
                 blocks.push_front(new_fetch);
+
+                // when a new block comes in we want the same block to remain selected,
+                // unless we're already at the end of the list
+                match block_list_state.selected() {
+                    // NB. this duplicates logic found in Key::Down, any changes should
+                    //      be made there as well
+                    None => {} // there is no selection to update
+                    Some(i) => {
+                        if let Some(height) = block_list_height {
+                            // if there is a populated block list to scroll (there is)
+                            if i < (height - 3).into() {
+                                // if we're not already at the end of the list
+                                block_list_state.select(Some(i + 1));
+                            }
+                        }
+                    }
+                };
 
                 {
                     let mut highest_block_number_opt = highest_block.lock().unwrap();
