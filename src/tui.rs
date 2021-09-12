@@ -296,6 +296,15 @@ impl FocusedPane {
             Transactions() => FocusedPane::UNFOCUSED_SELECTION,
         }
     }
+
+    fn txns_selection_color(&self) -> Color {
+        // TODO: I'm missing an abstraction which removes this tedium
+        use FocusedPane::*;
+        match self {
+            Blocks() => FocusedPane::UNFOCUSED_SELECTION,
+            Transactions() => FocusedPane::FOCUSED_SELECTION,
+        }
+    }
 }
 
 // TODO(2021-08-27) why does the following line not work?
@@ -468,7 +477,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             .border_style(Style::default().fg(focused_pane.blocks_border_color()))
                             .title("Blocks"),
                     )
-                    .highlight_style(Style::default().bg(focused_pane.blocks_selection_color()));
+                    .highlight_style(Style::default().bg(focused_pane.txns_selection_color()));
                 f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
                 block_list_height = Some(vert_chunks[0].height);
 
