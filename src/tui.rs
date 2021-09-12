@@ -536,9 +536,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                 .title("Transactions"),
                         )
                         // TODO: this should be txns_selection_color()
-                        .highlight_style(
-                            Style::default().bg(focused_pane.txns_selection_color()),
-                        );
+                        .highlight_style(Style::default().bg(focused_pane.txns_selection_color()));
 
                     f.render_stateful_widget(txn_list, horiz_chunks[1], &mut txn_list_state);
                 }
@@ -616,6 +614,11 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                             }
+
+                            // it doesn't make sense to persist this if we're looking at
+                            // txns for a new block. In the far future maybe we should
+                            // persist per-block scroll state?
+                            txn_list_state.select(None);
                         }
                         FocusedPane::Transactions() => {
                             // TODO: what if there are no transactions in this block?
@@ -638,23 +641,29 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     },
                 },
                 Key::Down => match configuring_columns {
-                    false => match block_list_state.selected() {
-                        None => {
-                            // 0 is the header, we start selecting at 1
-                            block_list_state.select(Some(1));
-                        }
-                        Some(i) => {
-                            // NB. this duplicates logic found in  NewBlock(), any changes
-                            //     here likely also need to be applied there
-                            if let Some(height) = block_list_height {
-                                if i >= (height - 3).into() {
-                                    block_list_state.select(Some(1));
-                                } else {
-                                    block_list_state.select(Some(i + 1));
+                    false => {
+                        match block_list_state.selected() {
+                            None => {
+                                // 0 is the header, we start selecting at 1
+                                block_list_state.select(Some(1));
+                            }
+                            Some(i) => {
+                                // NB. this duplicates logic found in  NewBlock(), any changes
+                                //     here likely also need to be applied there
+                                if let Some(height) = block_list_height {
+                                    if i >= (height - 3).into() {
+                                        block_list_state.select(Some(1));
+                                    } else {
+                                        block_list_state.select(Some(i + 1));
+                                    }
                                 }
                             }
                         }
-                    },
+
+                        // it doesn't make sense to persist this if we're looking at txns
+                        // for a new block
+                        txn_list_state.select(None);
+                    }
                     true => match column_list_state.selected() {
                         None => {
                             column_list_state.select(Some(0));
@@ -704,6 +713,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 let new_fetch = block_fetcher.fetch_block(block_num);
                 blocks.push_front(new_fetch);
 
+                // TODO(2021-09-11): I think a lot of this logic will become easier if the
+                //                   selection were stored as a highlighted block number
+                //                   rather than an offset
+
                 // when a new block comes in we want the same block to remain selected,
                 // unless we're already at the end of the list
                 match block_list_state.selected() {
@@ -716,6 +729,9 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             if i < (height - 3).into() {
                                 // if we're not already at the end of the list
                                 block_list_state.select(Some(i + 1));
+                            } else {
+                                // the selected block has changed
+                                txn_list_state.select(None);
                             }
                         }
                     }
