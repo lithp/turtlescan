@@ -71,7 +71,7 @@ struct Column<T> {
     render: Box<dyn Fn(&T) -> String>,
 }
 
-fn txn_columns() -> Vec<Column<Transaction>> {
+fn default_txn_columns() -> Vec<Column<Transaction>> {
     vec![
         Column {
             name: "idx",
@@ -201,11 +201,30 @@ fn render_block(columns: &Vec<Column<EthBlock<TxHash>>>, block: &EthBlock<TxHash
         })
 }
 
-fn block_to_txn_list_items<'a>(block: &'a EthBlock<Transaction>) -> Vec<ListItem<'static>> {
+fn columns_to_list_items<T>(columns: &Vec<Column<T>>) -> Vec<ListItem<'static>> {
+    columns
+        .iter()
+        .fold((Vec::new(), 0), |(mut result, count), col| {
+            if col.enabled {
+                let s = format!("[{}] {}", count, col.name);
+                result.push(ListItem::new(Span::raw(s)));
+                (result, count + 1)
+            } else {
+                let s = format!("[ ] {}", col.name);
+                result.push(ListItem::new(Span::raw(s)));
+                (result, count)
+            }
+        })
+        .0
+}
+
+fn block_to_txn_list_items<'a>(
+    columns: &Vec<Column<Transaction>>,
+    block: &'a EthBlock<Transaction>,
+) -> Vec<ListItem<'static>> {
     // add a header?
 
     // TODO: code duplication
-    let columns = txn_columns();
     let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
     let spans = Spans::from(columns.iter().filter(|col| col.enabled).fold(
         Vec::new(),
@@ -363,10 +382,18 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let mut configuring_columns: bool = false;
     let mut showing_transactions: bool = false;
 
+    let mut txn_columns = default_txn_columns();
+    let txn_column_len = txn_columns.len();
+
     let mut columns = default_columns();
     let column_items_len = columns.len();
 
     let mut focused_pane = FocusedPane::Blocks();
+
+    let column_count = |focus: &FocusedPane| match focus {
+        FocusedPane::Blocks() => column_items_len,
+        FocusedPane::Transactions() => txn_column_len,
+    };
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
@@ -525,7 +552,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                 }
                                 Completed(block) => {
                                     txn_list_length = Some(block.transactions.len());
-                                    block_to_txn_list_items(&block)
+                                    block_to_txn_list_items(&txn_columns, &block)
                                 }
                             }
                         }
@@ -560,20 +587,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 f.render_widget(status_line, vert_chunks[1]);
 
                 if configuring_columns {
-                    let column_items: Vec<ListItem> = columns
-                        .iter()
-                        .fold((Vec::new(), 0), |(mut result, count), col| {
-                            if col.enabled {
-                                let s = format!("[{}] {}", count, col.name);
-                                result.push(ListItem::new(Span::raw(s)));
-                                (result, count + 1)
-                            } else {
-                                let s = format!("[ ] {}", col.name);
-                                result.push(ListItem::new(Span::raw(s)));
-                                (result, count)
-                            }
-                        })
-                        .0;
+                    let column_items: Vec<ListItem> = match focused_pane {
+                        FocusedPane::Blocks() => columns_to_list_items(&columns),
+                        FocusedPane::Transactions() => columns_to_list_items(&txn_columns),
+                    };
 
                     let popup = List::new(column_items.clone())
                         .block(Block::default().title("Columns").borders(Borders::ALL))
@@ -666,10 +683,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     },
                     true => match column_list_state.selected() {
                         None => {
-                            column_list_state.select(Some(column_items_len - 1));
+                            column_list_state.select(Some(column_count(&focused_pane) - 1));
                         }
                         Some(0) => {
-                            column_list_state.select(Some(column_items_len - 1));
+                            column_list_state.select(Some(column_count(&focused_pane) - 1));
                         }
                         Some(i) => {
                             column_list_state.select(Some(i - 1));
@@ -739,7 +756,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             column_list_state.select(Some(0));
                         }
                         Some(i) => {
-                            if i >= column_items_len - 1 {
+                            if i >= column_count(&focused_pane) - 1 {
                                 column_list_state.select(Some(0));
                             } else {
                                 column_list_state.select(Some(i + 1));
@@ -751,7 +768,16 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     false => (),
                     true => {
                         if let Some(i) = column_list_state.selected() {
-                            columns[i].enabled = !columns[i].enabled;
+                            // TODO(2021-09-11) this entire codebase is ugly but this is
+                            //                  especially gnarly
+                            match focused_pane {
+                                FocusedPane::Blocks() => {
+                                    columns[i].enabled = !columns[i].enabled;
+                                }
+                                FocusedPane::Transactions() => {
+                                    txn_columns[i].enabled = !txn_columns[i].enabled;
+                                }
+                            };
                         }
                     }
                 },
