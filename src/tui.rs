@@ -355,7 +355,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
     let mut column_list_state = ListState::default();
 
+    // TODO(2021-09-11) I've written this scroll code three times now and it's finally
+    //                  becoming tedious, this needs to be pulled out into a struct
     let mut txn_list_state = ListState::default();
+    let mut txn_list_length: Option<usize> = None;
 
     let mut configuring_columns: bool = false;
     let mut showing_transactions: bool = false;
@@ -511,6 +514,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             // access this block, we only have it because the networking
                             // thread has finished.
 
+                            txn_list_length = None;
                             use BlockFetch::*;
                             match &mut *fetch {
                                 Waiting(height) => {
@@ -519,9 +523,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                 Started(height) => {
                                     vec![ListItem::new(Span::raw(format!("{} fetching", height)))]
                                 }
-                                // TODO: render transactions!
-                                // Completed(block) => vec![ListItem::new(Span::raw(format!("completed")))],
-                                Completed(block) => block_to_txn_list_items(&block),
+                                Completed(block) => {
+                                    txn_list_length = Some(block.transactions.len());
+                                    block_to_txn_list_items(&block)
+                                }
                             }
                         }
                     } else {
@@ -538,6 +543,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         // TODO: this should be txns_selection_color()
                         .highlight_style(Style::default().bg(focused_pane.txns_selection_color()));
 
+                    // TODO(2021-09-11) the header disappears when we scroll past the end
                     f.render_stateful_widget(txn_list, horiz_chunks[1], &mut txn_list_state);
                 }
 
@@ -593,10 +599,16 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     true => configuring_columns = false,
                     false => configuring_columns = true,
                 },
-                Key::Char('t') => {
-                    showing_transactions = !showing_transactions;
-                    focused_pane = FocusedPane::Blocks();
-                }
+                Key::Char('t') => match showing_transactions {
+                    true => {
+                        showing_transactions = false;
+                        focused_pane = FocusedPane::Blocks();
+                    }
+                    false => {
+                        showing_transactions = true;
+                        focused_pane = FocusedPane::Transactions();
+                    }
+                },
                 Key::Up => match configuring_columns {
                     false => match focused_pane {
                         FocusedPane::Blocks() => {
@@ -616,16 +628,40 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             }
 
                             // it doesn't make sense to persist this if we're looking at
-                            // txns for a new block. In the far future maybe we should
-                            // persist per-block scroll state?
+                            // txns for a new block. In the far future maybe this should
+                            // track per-block scroll state?
                             txn_list_state.select(None);
                         }
                         FocusedPane::Transactions() => {
-                            // TODO: what if there are no transactions in this block?
                             match txn_list_state.selected() {
-                                None => txn_list_state.select(Some(1)),
-                                Some(i) => txn_list_state.select(Some(i + 1)),
-                            }
+                                None => {
+                                    match txn_list_length {
+                                        None => {} // there is nothing to select
+                                        Some(txn_count) => {
+                                            // the last item
+                                            txn_list_state.select(Some(txn_count));
+                                        }
+                                    }
+                                }
+
+                                Some(current_selection) => {
+                                    match txn_list_length {
+                                        None => {
+                                            txn_list_state.select(None);
+                                        }
+                                        // TODO: I don't think this correctly handles the
+                                        //       case where the list of txns has changed
+                                        //       out from under us
+                                        Some(txn_count) => {
+                                            if current_selection <= 1 {
+                                                txn_list_state.select(Some(txn_count));
+                                            } else {
+                                                txn_list_state.select(Some(current_selection - 1));
+                                            }
+                                        }
+                                    }
+                                }
+                            };
                         }
                     },
                     true => match column_list_state.selected() {
@@ -641,29 +677,63 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     },
                 },
                 Key::Down => match configuring_columns {
-                    false => {
-                        match block_list_state.selected() {
-                            None => {
-                                // 0 is the header, we start selecting at 1
-                                block_list_state.select(Some(1));
-                            }
-                            Some(i) => {
-                                // NB. this duplicates logic found in  NewBlock(), any changes
-                                //     here likely also need to be applied there
-                                if let Some(height) = block_list_height {
-                                    if i >= (height - 3).into() {
-                                        block_list_state.select(Some(1));
-                                    } else {
-                                        block_list_state.select(Some(i + 1));
+                    false => match focused_pane {
+                        FocusedPane::Blocks() => {
+                            match block_list_state.selected() {
+                                None => {
+                                    // 0 is the header, we start selecting at 1
+                                    block_list_state.select(Some(1));
+                                }
+                                Some(i) => {
+                                    // NB. this duplicates logic found in  NewBlock(), any changes
+                                    //     here likely also need to be applied there
+                                    if let Some(height) = block_list_height {
+                                        if i >= (height - 3).into() {
+                                            block_list_state.select(Some(1));
+                                        } else {
+                                            block_list_state.select(Some(i + 1));
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        // it doesn't make sense to persist this if we're looking at txns
-                        // for a new block
-                        txn_list_state.select(None);
-                    }
+                            // it doesn't make sense to persist this if we're looking at txns
+                            // for a new block
+                            txn_list_state.select(None);
+                        }
+                        FocusedPane::Transactions() => {
+                            // scroll down
+                            match txn_list_state.selected() {
+                                None => {
+                                    match txn_list_length {
+                                        None | Some(0) => {} // there is nothing to select
+                                        Some(_txn_count) => {
+                                            // 1 b/c the header is sitting at 0
+                                            txn_list_state.select(Some(1));
+                                        }
+                                    }
+                                }
+
+                                Some(current_selection) => {
+                                    match txn_list_length {
+                                        None | Some(0) => {
+                                            txn_list_state.select(None);
+                                        }
+                                        // TODO: I don't think this correctly handles the
+                                        //       case where the list of txns has changed
+                                        //       out from under us
+                                        Some(txn_count) => {
+                                            if current_selection >= txn_count {
+                                                txn_list_state.select(Some(1));
+                                            } else {
+                                                txn_list_state.select(Some(current_selection + 1));
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                        }
+                    },
                     true => match column_list_state.selected() {
                         None => {
                             column_list_state.select(Some(0));
