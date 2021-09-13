@@ -437,12 +437,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     blocks.push_back(new_fetch);
                 }
 
-                let header = ListItem::new(columns_to_header(&columns));
+                let header = columns_to_header(&columns);
 
                 let block_lines = {
-                    let mut res = vec![header];
-
-                    let mut block_lines: Vec<ListItem> = blocks
+                    let block_lines: Vec<ListItem> = blocks
                         .iter()
                         .map(|arcfetch| {
                             let fetch = arcfetch.lock().unwrap();
@@ -456,9 +454,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                             ListItem::new(Span::raw(formatted))
                         })
                         .collect();
-
-                    res.append(&mut block_lines);
-                    res
+                    block_lines
                 };
 
                 let block_list_chunk = if showing_transactions {
@@ -467,14 +463,15 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     vert_chunks[0]
                 };
 
-                let block_list = List::new(block_lines)
+                let block_list = HeaderList::new(block_lines)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(focused_pane.blocks_border_color()))
                             .title("Blocks"),
                     )
-                    .highlight_style(Style::default().bg(focused_pane.blocks_selection_color()));
+                    .highlight_style(Style::default().bg(focused_pane.blocks_selection_color()))
+                    .header(header);
                 f.render_stateful_widget(block_list, block_list_chunk, &mut block_list_state);
                 block_list_height = Some(vert_chunks[0].height);
 
