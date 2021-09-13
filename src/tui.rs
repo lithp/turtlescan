@@ -477,7 +477,6 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 
                 if showing_transactions {
                     let txn_items = if let Some(offset) = block_list_state.selected() {
-                        let offset = offset - 1; // skip the header
                         let highest_block_number = {
                             let block_number_opt = highest_block.lock().unwrap();
                             block_number_opt.unwrap()
@@ -599,7 +598,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                         block_list_state.select(Some((height - 3).into()));
                                     }
                                     Some(i) => {
-                                        if i <= 1 {
+                                        if i <= 0 {
                                             block_list_state.select(Some((height - 3).into()));
                                         } else {
                                             block_list_state.select(Some(i - 1));
@@ -662,15 +661,14 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         FocusedPane::Blocks() => {
                             match block_list_state.selected() {
                                 None => {
-                                    // 0 is the header, we start selecting at 1
-                                    block_list_state.select(Some(1));
+                                    block_list_state.select(Some(0));
                                 }
                                 Some(i) => {
                                     // NB. this duplicates logic found in  NewBlock(), any changes
                                     //     here likely also need to be applied there
                                     if let Some(height) = block_list_height {
                                         if i >= (height - 3).into() {
-                                            block_list_state.select(Some(1));
+                                            block_list_state.select(Some(0));
                                         } else {
                                             block_list_state.select(Some(i + 1));
                                         }
