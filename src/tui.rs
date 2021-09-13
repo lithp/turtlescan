@@ -984,6 +984,11 @@ fn centered_rect(frame_size: Rect, desired_height: u16, desired_width: u16) -> R
 }
 
 struct HeaderList<'a> {
+    /*
+     * a List where the first row is a header and does not participate in
+     * scrolling or selection
+     */
+
     // we need a lifetime because the Title uses &str to hold text
     block: Option<Block<'a>>,
     highlight_style: Style,
