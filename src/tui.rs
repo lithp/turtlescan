@@ -12,7 +12,9 @@ use tui::Terminal;
 
 use tui::layout::{Constraint, Direction, Layout, Rect};
 use tui::style::{Color, Modifier, Style};
-use tui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph /*Wrap*/};
+use tui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+};
 
 use std::thread;
 // use std::time;
@@ -222,27 +224,7 @@ fn block_to_txn_list_items<'a>(
     columns: &Vec<Column<Transaction>>,
     block: &'a EthBlock<Transaction>,
 ) -> Vec<ListItem<'static>> {
-    // add a header?
-
-    // TODO: code duplication
-    let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
-    let spans = Spans::from(columns.iter().filter(|col| col.enabled).fold(
-        Vec::new(),
-        |mut accum, column| {
-            // soon rust iterators will have an intersperse method
-            if accum.len() != 0 {
-                accum.push(Span::raw(" "));
-            }
-            let filled = format!("{:<width$}", column.name, width = column.width);
-            accum.push(Span::styled(filled, underline_style));
-            accum
-        },
-    ));
-    let header = ListItem::new(spans);
-
-    let mut res = vec![header];
-
-    let mut txn_lines: Vec<ListItem> = block
+    let txn_lines: Vec<ListItem> = block
         .transactions
         .iter()
         .map(|txn| {
@@ -264,12 +246,10 @@ fn block_to_txn_list_items<'a>(
         .collect();
 
     if txn_lines.len() == 0 {
-        res.push(ListItem::new(Span::raw("this block has no transactions")))
+        vec![ListItem::new(Span::raw("this block has no transactions"))]
+    } else {
+        txn_lines
     }
-
-    res.append(&mut txn_lines);
-
-    res
 }
 
 enum FocusedPane {
@@ -560,22 +540,22 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                         Vec::new()
                     };
 
-                    let txn_list = List::new(txn_items)
+                    let txn_list = HeaderList::new(txn_items)
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(focused_pane.txns_border_color()))
                                 .title("Transactions"),
                         )
-                        // TODO: this should be txns_selection_color()
-                        .highlight_style(Style::default().bg(focused_pane.txns_selection_color()));
-
-                    // TODO(2021-09-11) the header disappears when we scroll past the end
+                        .highlight_style(Style::default().bg(focused_pane.txns_selection_color()))
+                        .header(columns_to_header(&txn_columns));
                     f.render_stateful_widget(txn_list, horiz_chunks[1], &mut txn_list_state);
                 }
 
                 let bold_title =
                     Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
+
+                // TODO: if both panes are active show (Tab) focus {the other pane}
 
                 let status_string = match configuring_columns {
                     false => "  (q) quit - (c) configure columns - (t) toggle transactions view",
@@ -656,7 +636,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                         None => {} // there is nothing to select
                                         Some(txn_count) => {
                                             // the last item
-                                            txn_list_state.select(Some(txn_count));
+                                            txn_list_state.select(Some(txn_count - 1));
                                         }
                                     }
                                 }
@@ -670,8 +650,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                         //       case where the list of txns has changed
                                         //       out from under us
                                         Some(txn_count) => {
-                                            if current_selection <= 1 {
-                                                txn_list_state.select(Some(txn_count));
+                                            if current_selection == 0 {
+                                                txn_list_state.select(Some(txn_count - 1));
                                             } else {
                                                 txn_list_state.select(Some(current_selection - 1));
                                             }
@@ -725,8 +705,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                     match txn_list_length {
                                         None | Some(0) => {} // there is nothing to select
                                         Some(_txn_count) => {
-                                            // 1 b/c the header is sitting at 0
-                                            txn_list_state.select(Some(1));
+                                            txn_list_state.select(Some(0));
                                         }
                                     }
                                 }
@@ -740,8 +719,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                                         //       case where the list of txns has changed
                                         //       out from under us
                                         Some(txn_count) => {
-                                            if current_selection >= txn_count {
-                                                txn_list_state.select(Some(1));
+                                            if current_selection >= txn_count - 1 {
+                                                txn_list_state.select(Some(0));
                                             } else {
                                                 txn_list_state.select(Some(current_selection + 1));
                                             }
@@ -1019,5 +998,108 @@ fn centered_rect(frame_size: Rect, desired_height: u16, desired_width: u16) -> R
         y: frame_size.y + (frame_size.height - height) / 2,
         width: width,
         height: height,
+    }
+}
+
+struct HeaderList<'a> {
+    // we need a lifetime because the Title uses &str to hold text
+    block: Option<Block<'a>>,
+    highlight_style: Style,
+
+    header: Option<Spans<'a>>,
+    items: Vec<ListItem<'a>>,
+}
+
+impl<'a> HeaderList<'a> {
+    fn new(items: Vec<ListItem<'a>>) -> HeaderList<'a> {
+        HeaderList {
+            block: None,
+            highlight_style: Style::default(),
+            items: items,
+            header: None,
+        }
+    }
+
+    fn block(mut self, block: Block<'a>) -> HeaderList<'a> {
+        self.block = Some(block);
+        self
+    }
+
+    fn highlight_style(mut self, style: Style) -> HeaderList<'a> {
+        self.highlight_style = style;
+        self
+    }
+
+    fn header(mut self, header: Spans<'a>) -> HeaderList<'a> {
+        self.header = Some(header);
+        self
+    }
+}
+
+// TODO(2021-09-12) use this to render the block list header
+fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans {
+    let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
+    Spans::from(
+        columns
+            .iter()
+            .filter(|col| col.enabled)
+            .fold(Vec::new(), |mut accum, column| {
+                // soon rust iterators will have an intersperse method
+                if accum.len() != 0 {
+                    accum.push(Span::raw(" "));
+                }
+                let filled = format!("{:<width$}", column.name, width = column.width);
+                accum.push(Span::styled(filled, underline_style));
+                accum
+            }),
+    )
+}
+
+use tui::buffer::Buffer;
+
+impl<'a> StatefulWidget for HeaderList<'a> {
+    type State = ListState;
+
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        let inner_area = match self.block {
+            None => area,
+            Some(block) => {
+                let inner = block.inner(area);
+                block.render(area, buf);
+                inner
+            }
+        };
+
+        if inner_area.height < 1 || inner_area.width < 1 {
+            return;
+        }
+
+        let inner_area = match self.header {
+            None => inner_area,
+            Some(spans) => {
+                let paragraph_area = Rect {
+                    x: inner_area.x,
+                    y: inner_area.y,
+                    width: inner_area.width,
+                    height: 1,
+                };
+                Paragraph::new(spans).render(paragraph_area, buf);
+
+                // return the trimmed area
+                Rect {
+                    x: inner_area.x,
+                    y: inner_area.y.saturating_add(1).min(inner_area.bottom()),
+                    width: inner_area.width,
+                    height: inner_area.height.saturating_sub(1),
+                }
+            }
+        };
+
+        if inner_area.height < 1 {
+            return;
+        }
+
+        let inner_list = List::new(self.items).highlight_style(self.highlight_style);
+        StatefulWidget::render(inner_list, inner_area, buf, state);
     }
 }
