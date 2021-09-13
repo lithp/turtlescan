@@ -437,20 +437,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                     blocks.push_back(new_fetch);
                 }
 
-                let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
-                let spans = Spans::from(columns.iter().filter(|col| col.enabled).fold(
-                    Vec::new(),
-                    |mut accum, column| {
-                        // soon rust iterators will have an intersperse method
-                        if accum.len() != 0 {
-                            accum.push(Span::raw(" "));
-                        }
-                        let filled = format!("{:<width$}", column.name, width = column.width);
-                        accum.push(Span::styled(filled, underline_style));
-                        accum
-                    },
-                ));
-                let header = ListItem::new(spans);
+                let header = ListItem::new(columns_to_header(&columns));
 
                 let block_lines = {
                     let mut res = vec![header];
@@ -1036,7 +1023,6 @@ impl<'a> HeaderList<'a> {
     }
 }
 
-// TODO(2021-09-12) use this to render the block list header
 fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans {
     let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
     Spans::from(
