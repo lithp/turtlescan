@@ -37,6 +37,9 @@ use tokio::sync::mpsc as tokio_mpsc;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
+use std::convert::TryInto;
+
 enum UIMessage {
     // the user has given us some input over stdin
     Key(termion::event::Key),
@@ -128,11 +131,24 @@ fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
             enabled: true,
         },
         Column {
-            name: "blk hash",
+            name: "block hash",
             width: 12,
             render: Box::new(|block| match block.hash {
                 Some(hash) => util::format_block_hash(hash.as_bytes()),
                 None => "unknown".to_string(),
+            }),
+            enabled: true,
+        },
+        Column {
+            name: "block time (UTC)",
+            width: 19,
+            render: Box::new(|block| {
+                let timestamp = block.timestamp;
+                let low64 = timestamp.as_u64(); // TODO: panics if too big
+                let low64signed = low64.try_into().unwrap(); // TODO: panic
+                let naive_time = NaiveDateTime::from_timestamp(low64signed, 0);
+                let time = DateTime::<Utc>::from_utc(naive_time, Utc);
+                time.format("%Y-%m-%d %H:%M:%S").to_string()
             }),
             enabled: true,
         },
@@ -988,7 +1004,6 @@ struct HeaderList<'a> {
      * a List where the first row is a header and does not participate in
      * scrolling or selection
      */
-
     // we need a lifetime because the Title uses &str to hold text
     block: Option<Block<'a>>,
     highlight_style: Style,
