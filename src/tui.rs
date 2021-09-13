@@ -369,6 +369,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
     let mut block_list_height: Option<u16> = None;
 
     let mut column_list_state = ListState::default();
+    column_list_state.select(Some(0));
 
     // TODO(2021-09-11) I've written this scroll code three times now and it's finally
     //                  becoming tedious, this needs to be pulled out into a struct
