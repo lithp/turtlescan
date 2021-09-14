@@ -55,13 +55,26 @@ enum UIMessage {
 enum BlockFetch<T> {
     Waiting(),
     Started(),
-    Completed(EthBlock<T>),
+    Completed(T),
     // Failed(io::Error),
 }
 
+#[derive(Clone)]
+struct ArcStatus<T>(Arc<Mutex<BlockFetch<T>>>);
+
+use std::default::Default;
+
+impl<T> Default for ArcStatus<T> {
+    fn default() -> Self {
+        ArcStatus(
+            Arc::new(Mutex::new(BlockFetch::Waiting()))
+        )
+    }
+}
+
 // TODO: is there a way to drop this redundency?
-type ArcFetch = Arc<Mutex<BlockFetch<TxHash>>>;
-type ArcFetchTxns = Arc<Mutex<BlockFetch<Transaction>>>;
+type ArcFetch = ArcStatus<EthBlock<TxHash>>;
+type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
 
 struct BlockRequest(u32, ArcFetch);
 struct BlockTxnsRequest(u32, ArcFetchTxns);
@@ -84,19 +97,9 @@ enum RequestStatus<T> {
     Completed(T),
 }
 
-struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
+// struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
 type ArcBlockFetch = ArcStatus<EthBlock<TxHash>>;
 type ArcBlockTxnsFetch = ArcStatus<EthBlock<Transaction>>;
-
-use std::default::Default;
-
-impl<T> Default for ArcStatus<T> {
-    fn default() -> Self {
-        ArcStatus(
-            Arc::new(Mutex::new(RequestStatus::Waiting()))
-        )
-    }
-}
 
 enum Request {
     Block(u32, ArcStatus<EthBlock<TxHash>>),
@@ -698,10 +701,9 @@ impl TUI {
                 .blocks
                 .iter()
                 .map(|block_request| {
-                    // block nunber is in 0
-                    // let arcfetch = block_request.1;
+                    //TODO there has to be a better way
                     let height = block_request.0;
-                    let fetch = block_request.1.lock().unwrap();
+                    let fetch = block_request.1.0.lock().unwrap();
 
                     use BlockFetch::*;
                     let formatted = match &*fetch {
@@ -756,7 +758,7 @@ impl TUI {
             };
 
             {
-                let mut fetch = arcfetch.lock().unwrap();
+                let mut fetch = arcfetch.0.lock().unwrap();
 
                 // TODO: call block_to_txn_list_items when not inside a critical
                 // section. This is low priority, because by the time we're calling
@@ -952,7 +954,7 @@ impl Networking {
 
     // TODO: return error
     fn fetch_block(&self, block_number: u32) -> BlockRequest {
-        let new_arc = Arc::new(Mutex::new(BlockFetch::Waiting()));
+        let new_arc = ArcStatus::default();
         let sent_arc = new_arc.clone();
 
         let sent_request = NetworkRequest::Block(BlockRequest(block_number, sent_arc));
@@ -966,20 +968,19 @@ impl Networking {
     }
 
     fn fetch_block_with_txns(&self, block_number: u32) -> ArcFetchTxns {
-        let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting()));
-
-        let sent_fetch = new_fetch.clone();
+        let new_arc = ArcStatus::default();
+        let sent_arc = new_arc.clone();
 
         if let Err(_) = self
             .network_tx
-            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, sent_fetch)))
+            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, sent_arc)))
         {
             // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
             panic!("remote end closed?");
         }
 
-        new_fetch
+        new_arc
     }
 }
 
@@ -1029,7 +1030,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 let block_number = {
                     // we're blocking the thread but these critical sections are kept as short as
                     // possible (here and elsewhere in the program)
-                    let mut fetch = arc_fetch.lock().unwrap();
+                    let mut fetch = arc_fetch.0.lock().unwrap();
 
                     if let BlockFetch::Waiting() = *fetch {
                         // tell the UI we're handling this fetch
@@ -1045,14 +1046,14 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
 
                 {
-                    let mut fetch = arc_fetch.lock().unwrap();
+                    let mut fetch = arc_fetch.0.lock().unwrap();
                     *fetch = BlockFetch::Completed(complete_block);
                 }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
             NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, arc_fetch)) => {
                 let block_number = {
-                    let mut fetch = arc_fetch.lock().unwrap();
+                    let mut fetch = arc_fetch.0.lock().unwrap();
 
                     if let BlockFetch::Waiting() = *fetch {
                         *fetch = BlockFetch::Started();
@@ -1073,7 +1074,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                     .unwrap();
 
                 {
-                    let mut fetch = arc_fetch.lock().unwrap();
+                    let mut fetch = arc_fetch.0.lock().unwrap();
                     *fetch = BlockFetch::Completed(complete_block);
                 }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
