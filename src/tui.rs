@@ -54,7 +54,7 @@ enum UIMessage {
 
 enum BlockFetch<T> {
     Waiting(),
-    Started(u32),
+    Started(),
     Completed(EthBlock<T>),
     // Failed(io::Error),
 }
@@ -706,7 +706,7 @@ impl TUI {
                     use BlockFetch::*;
                     let formatted = match &*fetch {
                         Waiting() => format!("{} waiting", height),
-                        Started(_height) => format!("{} fetching", height),
+                        Started() => format!("{} fetching", height),
                         Completed(block) => render_block(&self.columns, block),
                     };
                     ListItem::new(Span::raw(formatted))
@@ -770,7 +770,7 @@ impl TUI {
                     Waiting() => {
                         vec![ListItem::new(Span::raw(format!("{} waiting", block_at_offset)))]
                     }
-                    Started(_height) => {
+                    Started() => {
                         vec![ListItem::new(Span::raw(format!("{} fetching", block_at_offset)))]
                     }
                     Completed(block) => {
@@ -1033,7 +1033,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 
                     if let BlockFetch::Waiting() = *fetch {
                         // tell the UI we're handling this fetch
-                        *fetch = BlockFetch::Started(block_number);
+                        *fetch = BlockFetch::Started();
 
                         block_number
                     } else {
@@ -1055,7 +1055,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                     let mut fetch = arc_fetch.lock().unwrap();
 
                     if let BlockFetch::Waiting() = *fetch {
-                        *fetch = BlockFetch::Started(block_number);
+                        *fetch = BlockFetch::Started();
 
                         block_number
                     } else {
