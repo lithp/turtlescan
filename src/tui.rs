@@ -755,47 +755,46 @@ impl TUI {
                 Paragraph::new(Span::raw("fetching current block number")),
                 frame.size(),
             );
+            return;
+        }
+
+        let vert_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref())
+            .split(frame.size());
+
+        let horiz_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(vert_chunks[0]);
+
+        let block_list_chunk = if self.showing_transactions {
+            horiz_chunks[0]
         } else {
-            let vert_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref())
-                .split(frame.size());
+            vert_chunks[0]
+        };
 
-            let horiz_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(vert_chunks[0]);
+        self.draw_block_list(frame, block_list_chunk, block_fetcher);
 
-            let block_list_chunk = if self.showing_transactions {
-                horiz_chunks[0]
-            } else {
-                vert_chunks[0]
-            };
+        if self.showing_transactions {
+            self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+        }
 
-            self.draw_block_list(frame, block_list_chunk, block_fetcher);
+        let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
-            if self.showing_transactions {
-                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
-            }
+        // TODO: if both panes are active show (Tab) focus {the other pane}
 
-            let bold_title =
-                Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
+        let status_string = match self.configuring_columns {
+            false => "  (q) quit - (c) configure columns - (t) toggle transactions view",
+            true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
+        };
 
-            // TODO: if both panes are active show (Tab) focus {the other pane}
+        let status_line = Paragraph::new(status_string).block(Block::default().title(bold_title));
+        frame.render_widget(status_line, vert_chunks[1]);
 
-            let status_string = match self.configuring_columns {
-                false => "  (q) quit - (c) configure columns - (t) toggle transactions view",
-                true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
-            };
-
-            let status_line =
-                Paragraph::new(status_string).block(Block::default().title(bold_title));
-            frame.render_widget(status_line, vert_chunks[1]);
-
-            if self.configuring_columns {
-                self.draw_popup(frame);
-            }
+        if self.configuring_columns {
+            self.draw_popup(frame);
         }
     }
 }
