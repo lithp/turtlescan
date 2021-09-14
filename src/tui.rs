@@ -852,11 +852,12 @@ impl TUI {
                     Completed(block) => {
                         let receipts_fetch = receipts_arcfetch.lock().unwrap();
 
-                        let receipts = if let Completed(receipts) = &*receipts_fetch {
-                            Some(receipts)
-                        } else {
-                            None
-                        };
+                        let receipts: Option<&Vec<TransactionReceipt>> =
+                            if let Completed(receipts) = &*receipts_fetch {
+                                Some(receipts)
+                            } else {
+                                None
+                            };
 
                         self.txn_list_length = Some(block.transactions.len());
                         block_to_txn_list_items(
