@@ -398,7 +398,7 @@ struct TUI {
     column_items_len: usize,
 
     /* shared state */
-    blocks: VecDeque<ArcFetch>,
+    blocks: VecDeque<BlockRequest>,
 
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
     blocks_to_txns: HashMap<u32, ArcFetchTxns>,
@@ -697,13 +697,16 @@ impl TUI {
             let block_lines: Vec<ListItem> = self
                 .blocks
                 .iter()
-                .map(|arcfetch| {
-                    let fetch = arcfetch.lock().unwrap();
+                .map(|block_request| {
+                    // block nunber is in 0
+                    // let arcfetch = block_request.1;
+                    let height = block_request.0;
+                    let fetch = block_request.1.lock().unwrap();
 
                     use BlockFetch::*;
                     let formatted = match &*fetch {
-                        Waiting(height) => format!("{} waiting", height),
-                        Started(height) => format!("{} fetching", height),
+                        Waiting(_height) => format!("{} waiting", height),
+                        Started(_height) => format!("{} fetching", height),
                         Completed(block) => render_block(&self.columns, block),
                     };
                     ListItem::new(Span::raw(formatted))
@@ -947,18 +950,18 @@ impl Networking {
     }
 
     // TODO: return error
-    fn fetch_block(&self, block_number: u32) -> ArcFetch {
-        let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
+    fn fetch_block(&self, block_number: u32) -> BlockRequest {
+        let new_arc = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
+        let sent_arc = new_arc.clone();
 
-        let sent_fetch = new_fetch.clone();
-
-        if let Err(_) = self.network_tx.send(NetworkRequest::Block(BlockRequest(block_number, sent_fetch))) {
+        let sent_request = NetworkRequest::Block(BlockRequest(block_number, sent_arc));
+        if let Err(_) = self.network_tx.send(sent_request) {
             // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
             panic!("remote end closed?");
         }
 
-        new_fetch
+        BlockRequest(block_number, new_arc)
     }
 
     fn fetch_block_with_txns(&self, block_number: u32) -> ArcFetchTxns {
