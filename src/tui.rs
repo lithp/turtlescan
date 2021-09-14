@@ -53,7 +53,7 @@ enum UIMessage {
 }
 
 enum BlockFetch<T> {
-    Waiting(u32),
+    Waiting(),
     Started(u32),
     Completed(EthBlock<T>),
     // Failed(io::Error),
@@ -705,7 +705,7 @@ impl TUI {
 
                     use BlockFetch::*;
                     let formatted = match &*fetch {
-                        Waiting(_height) => format!("{} waiting", height),
+                        Waiting() => format!("{} waiting", height),
                         Started(_height) => format!("{} fetching", height),
                         Completed(block) => render_block(&self.columns, block),
                     };
@@ -741,6 +741,7 @@ impl TUI {
                 let block_number_opt = self.highest_block.lock().unwrap();
                 block_number_opt.unwrap()
             };
+            // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
             let block_at_offset = highest_block_number - (offset as u32);
 
             let arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
@@ -766,11 +767,11 @@ impl TUI {
                 self.txn_list_length = None;
                 use BlockFetch::*;
                 match &mut *fetch {
-                    Waiting(height) => {
-                        vec![ListItem::new(Span::raw(format!("{} waiting", height)))]
+                    Waiting() => {
+                        vec![ListItem::new(Span::raw(format!("{} waiting", block_at_offset)))]
                     }
-                    Started(height) => {
-                        vec![ListItem::new(Span::raw(format!("{} fetching", height)))]
+                    Started(_height) => {
+                        vec![ListItem::new(Span::raw(format!("{} fetching", block_at_offset)))]
                     }
                     Completed(block) => {
                         self.txn_list_length = Some(block.transactions.len());
@@ -951,7 +952,7 @@ impl Networking {
 
     // TODO: return error
     fn fetch_block(&self, block_number: u32) -> BlockRequest {
-        let new_arc = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
+        let new_arc = Arc::new(Mutex::new(BlockFetch::Waiting()));
         let sent_arc = new_arc.clone();
 
         let sent_request = NetworkRequest::Block(BlockRequest(block_number, sent_arc));
@@ -965,7 +966,7 @@ impl Networking {
     }
 
     fn fetch_block_with_txns(&self, block_number: u32) -> ArcFetchTxns {
-        let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting(block_number)));
+        let new_fetch = Arc::new(Mutex::new(BlockFetch::Waiting()));
 
         let sent_fetch = new_fetch.clone();
 
@@ -1024,13 +1025,13 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
         // TODO(2021-09-10): some gnarly logic duplication
         match request {
             //TODO any way to get rid of this verbose nesting?
-            NetworkRequest::Block(BlockRequest(_block_number, arc_fetch)) => {
+            NetworkRequest::Block(BlockRequest(block_number, arc_fetch)) => {
                 let block_number = {
                     // we're blocking the thread but these critical sections are kept as short as
                     // possible (here and elsewhere in the program)
                     let mut fetch = arc_fetch.lock().unwrap();
 
-                    if let BlockFetch::Waiting(block_number) = *fetch {
+                    if let BlockFetch::Waiting() = *fetch {
                         // tell the UI we're handling this fetch
                         *fetch = BlockFetch::Started(block_number);
 
@@ -1049,11 +1050,11 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
-            NetworkRequest::BlockWithTxns(BlockTxnsRequest(_block_number, arc_fetch)) => {
+            NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, arc_fetch)) => {
                 let block_number = {
                     let mut fetch = arc_fetch.lock().unwrap();
 
-                    if let BlockFetch::Waiting(block_number) = *fetch {
+                    if let BlockFetch::Waiting() = *fetch {
                         *fetch = BlockFetch::Started(block_number);
 
                         block_number
