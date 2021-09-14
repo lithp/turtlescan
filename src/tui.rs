@@ -63,11 +63,62 @@ enum BlockFetch<T> {
 type ArcFetch = Arc<Mutex<BlockFetch<TxHash>>>;
 type ArcFetchTxns = Arc<Mutex<BlockFetch<Transaction>>>;
 
+struct BlockRequest(u32, ArcFetch);
+struct BlockTxnsRequest(u32, ArcFetchTxns);
+
 // TODO: I think these layers are in the wrong order
 enum NetworkRequest {
-    Block(ArcFetch),
-    BlockWithTxns(ArcFetchTxns),
+    // wrapping b/c it is not possible to use an enum variant as a type...
+    Block(BlockRequest),
+    BlockWithTxns(BlockTxnsRequest),
 }
+
+// take 3:
+//
+// how do you incrementally switch over to the new defs?
+// this will be the final def, but I was to get here by slowing changing the above defs
+
+enum RequestStatus<T> {
+    Waiting(),
+    Started(),
+    Completed(T),
+}
+
+struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
+type ArcBlockFetch = ArcStatus<EthBlock<TxHash>>;
+type ArcBlockTxnsFetch = ArcStatus<EthBlock<Transaction>>;
+
+use std::default::Default;
+
+impl<T> Default for ArcStatus<T> {
+    fn default() -> Self {
+        ArcStatus(
+            Arc::new(Mutex::new(RequestStatus::Waiting()))
+        )
+    }
+}
+
+enum Request {
+    Block(u32, ArcStatus<EthBlock<TxHash>>),
+    BlockWithTxns(u32, ArcStatus<EthBlock<Transaction>>),
+}
+
+
+/*
+ * This is what we already have, w some minor tweaks
+ *
+ * networking:
+ * loop {
+ *    let request = rx.recv().await
+ *
+ *    match request {
+ *        let id = request.block_id
+ *        request.start()
+ *        let res = provider.fetch(id)
+ *        request.complete(res)
+ *    }
+ * }
+ */
 
 struct Column<T> {
     name: &'static str,
@@ -108,6 +159,7 @@ fn default_txn_columns() -> Vec<Column<Transaction>> {
             }),
             enabled: true,
         },
+        // also, there are more important cols if we fetch out the receipts
         // more cols:
         //   nonce: U256
         //   value: U256
@@ -900,7 +952,7 @@ impl Networking {
 
         let sent_fetch = new_fetch.clone();
 
-        if let Err(_) = self.network_tx.send(NetworkRequest::Block(sent_fetch)) {
+        if let Err(_) = self.network_tx.send(NetworkRequest::Block(BlockRequest(block_number, sent_fetch))) {
             // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
             panic!("remote end closed?");
@@ -916,7 +968,7 @@ impl Networking {
 
         if let Err(_) = self
             .network_tx
-            .send(NetworkRequest::BlockWithTxns(sent_fetch))
+            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, sent_fetch)))
         {
             // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
@@ -968,7 +1020,8 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 
         // TODO(2021-09-10): some gnarly logic duplication
         match request {
-            NetworkRequest::Block(arc_fetch) => {
+            //TODO any way to get rid of this verbose nesting?
+            NetworkRequest::Block(BlockRequest(_block_number, arc_fetch)) => {
                 let block_number = {
                     // we're blocking the thread but these critical sections are kept as short as
                     // possible (here and elsewhere in the program)
@@ -993,7 +1046,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
-            NetworkRequest::BlockWithTxns(arc_fetch) => {
+            NetworkRequest::BlockWithTxns(BlockTxnsRequest(_block_number, arc_fetch)) => {
                 let block_number = {
                     let mut fetch = arc_fetch.lock().unwrap();
 
