@@ -930,7 +930,11 @@ impl Networking {
 
 #[tokio::main(worker_threads = 1)]
 async fn run_networking(
-    provider: Provider<Ws>, // Ws is required because we watch for new blocks
+    /*
+     * Ws is required because we watch for new blocks
+     * TODO(2021-09-14) document this limitation somewhere visible
+     */
+    provider: Provider<Ws>,
     highest_block: Arc<Mutex<Option<u32>>>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     network_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
