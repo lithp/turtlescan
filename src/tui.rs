@@ -54,7 +54,7 @@ enum UIMessage {
     NewBlock(EthBlock<TxHash>),
 }
 
-enum BlockFetch<T> {
+enum RequestStatus<T> {
     Waiting(),
     Started(),
     Completed(T),
@@ -62,13 +62,13 @@ enum BlockFetch<T> {
 }
 
 #[derive(Clone)]
-struct ArcStatus<T>(Arc<Mutex<BlockFetch<T>>>);
+struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
 
 use std::default::Default;
 
 impl<T> Default for ArcStatus<T> {
     fn default() -> Self {
-        ArcStatus(Arc::new(Mutex::new(BlockFetch::Waiting())))
+        ArcStatus(Arc::new(Mutex::new(RequestStatus::Waiting())))
     }
 }
 
@@ -78,7 +78,7 @@ use std::sync::MutexGuard;
 impl<T> ArcStatus<T> {
     // prevents callers from needing to care about .0
     // if I end up wanting to forward more of these Deref might be the better option
-    fn lock(&self) -> LockResult<MutexGuard<'_, BlockFetch<T>>> {
+    fn lock(&self) -> LockResult<MutexGuard<'_, RequestStatus<T>>> {
         return self.0.lock();
     }
 
@@ -87,8 +87,8 @@ impl<T> ArcStatus<T> {
     fn start_if_waiting(&self) -> Result<(), SimpleError> {
         let mut fetch = self.lock().unwrap();
 
-        if let BlockFetch::Waiting() = *fetch {
-            *fetch = BlockFetch::Started();
+        if let RequestStatus::Waiting() = *fetch {
+            *fetch = RequestStatus::Started();
             Ok(())
         } else {
             Err(SimpleError::new("arc was in the wrong state"))
@@ -99,7 +99,7 @@ impl<T> ArcStatus<T> {
     /// overwrites anything which was previously in here
     fn complete(&self, result: T) {
         let mut fetch = self.lock().unwrap();
-        *fetch = BlockFetch::Completed(result);
+        *fetch = RequestStatus::Completed(result);
     }
 }
 
@@ -595,7 +595,7 @@ impl TUI {
         // we cannot add this block directly because it is missing a bunch of
         // fields that we would like to render so instead we add a placeholder and
         // ask the networking thread to give us a better block
-        // let new_fetch = Arc::new(Mutex::new(BlockFetch::Completed(block)));
+        // let new_fetch = Arc::new(Mutex::new(RequestStatus::Completed(block)));
 
         // TODO(2021-09-09) this is not necessarily a brand new block
         //                  there could have been a reorg, and it's possible
@@ -697,7 +697,7 @@ impl TUI {
                     let height = block_request.0;
                     let fetch = block_request.1.lock().unwrap();
 
-                    use BlockFetch::*;
+                    use RequestStatus::*;
                     let formatted = match &*fetch {
                         Waiting() => format!("{} waiting", height),
                         Started() => format!("{} fetching", height),
@@ -759,7 +759,7 @@ impl TUI {
                 // thread has finished.
 
                 self.txn_list_length = None;
-                use BlockFetch::*;
+                use RequestStatus::*;
                 match &mut *fetch {
                     Waiting() => {
                         vec![ListItem::new(Span::raw(format!(
