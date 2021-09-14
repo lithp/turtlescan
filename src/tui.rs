@@ -29,9 +29,7 @@ use simple_error::SimpleError;
 
 use std::collections::{HashMap, VecDeque};
 
-use ethers_core::types::Block as EthBlock;
-use ethers_core::types::Transaction;
-use ethers_core::types::TxHash;
+use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 
 use std::sync::mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -41,6 +39,8 @@ use signal_hook::iterator::Signals;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use std::convert::TryInto;
+
+use std::iter;
 
 enum UIMessage {
     // the user has given us some input over stdin
@@ -105,14 +105,41 @@ impl<T> ArcStatus<T> {
 
 type ArcFetch = ArcStatus<EthBlock<TxHash>>;
 type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
+type ArcFetchReceipts = ArcStatus<Vec<TransactionReceipt>>;
 
+#[derive(Clone)]
 struct BlockRequest(u64, ArcFetch);
+
+#[derive(Clone)]
 struct BlockTxnsRequest(u64, ArcFetchTxns);
 
+#[derive(Clone)]
+struct BlockReceiptsRequest(u64, ArcFetchReceipts);
+
+impl BlockRequest {
+    fn new(blocknum: u64) -> BlockRequest {
+        BlockRequest(blocknum, ArcStatus::default())
+    }
+}
+
+impl BlockTxnsRequest {
+    fn new(blocknum: u64) -> BlockTxnsRequest {
+        BlockTxnsRequest(blocknum, ArcStatus::default())
+    }
+}
+
+impl BlockReceiptsRequest {
+    fn new(blocknum: u64) -> BlockReceiptsRequest {
+        BlockReceiptsRequest(blocknum, ArcStatus::default())
+    }
+}
+
+#[derive(Clone)]
 enum NetworkRequest {
     // wrapping b/c it is not possible to use an enum variant as a type...
     Block(BlockRequest),
     BlockWithTxns(BlockTxnsRequest),
+    BlockReceipts(BlockReceiptsRequest),
 }
 
 struct Column<T> {
@@ -120,6 +147,18 @@ struct Column<T> {
     width: usize,
     enabled: bool,
     render: Box<dyn Fn(&T) -> String>,
+}
+
+fn default_receipt_columns() -> Vec<Column<TransactionReceipt>> {
+    vec![Column {
+        name: "gasUsed",
+        width: 5,
+        render: Box::new(|receipt| match receipt.gas_used {
+            None => "???".to_string(),
+            Some(gas) => gas.to_string(),
+        }),
+        enabled: true,
+    }]
 }
 
 fn default_txn_columns() -> Vec<Column<Transaction>> {
@@ -250,7 +289,7 @@ fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
     ]
 }
 
-fn render_block(columns: &Vec<Column<EthBlock<TxHash>>>, block: &EthBlock<TxHash>) -> String {
+fn render_item_with_cols<T>(columns: &Vec<Column<T>>, item: &T) -> String {
     columns
         .iter()
         .filter(|col| col.enabled)
@@ -258,7 +297,7 @@ fn render_block(columns: &Vec<Column<EthBlock<TxHash>>>, block: &EthBlock<TxHash
             if accum.len() != 0 {
                 accum.push_str(" ");
             }
-            let rendered = (column.render)(block);
+            let rendered = (column.render)(item);
             let filled = format!("{:>width$}", rendered, width = column.width);
 
             accum.push_str(&filled);
@@ -283,36 +322,50 @@ fn columns_to_list_items<T>(columns: &Vec<Column<T>>) -> Vec<ListItem<'static>> 
         .0
 }
 
-fn block_to_txn_list_items<'a>(
-    columns: &Vec<Column<Transaction>>,
-    block: &'a EthBlock<Transaction>,
+fn block_to_txn_list_items(
+    txn_columns: &Vec<Column<Transaction>>,
+    receipt_columns: &Vec<Column<TransactionReceipt>>,
+    block: &EthBlock<Transaction>,
+    receipts: Option<&Vec<TransactionReceipt>>,
 ) -> Vec<ListItem<'static>> {
-    let txn_lines: Vec<ListItem> = block
+    if block.transactions.len() == 0 {
+        return vec![ListItem::new(Span::raw("this block has no transactions"))];
+    }
+
+    if let Some(ref receipts) = receipts {
+        if block.transactions.len() != receipts.len() {
+            panic!("uh on"); // TODO: return a real error
+        }
+    }
+
+    let txn_spans: Vec<Span> = block
         .transactions
         .iter()
         .map(|txn| {
-            let formatted = columns.iter().filter(|col| col.enabled).fold(
-                String::new(),
-                |mut accum, column| {
-                    if accum.len() != 0 {
-                        accum.push_str(" ");
-                    }
-                    let rendered = (column.render)(txn);
-                    let filled = format!("{:>width$}", rendered, width = column.width);
-
-                    accum.push_str(&filled);
-                    accum
-                },
-            );
-            ListItem::new(Span::raw(formatted))
+            let formatted = render_item_with_cols(txn_columns, txn);
+            Span::raw(formatted)
         })
         .collect();
 
-    if txn_lines.len() == 0 {
-        vec![ListItem::new(Span::raw("this block has no transactions"))]
-    } else {
-        txn_lines
-    }
+    let receipt_spans: Vec<Span> = match receipts {
+        Some(receipts) => receipts
+            .iter()
+            .map(|receipt| {
+                let formatted = render_item_with_cols(receipt_columns, receipt);
+                Span::raw(formatted)
+            })
+            .collect(),
+        None => iter::repeat("".to_string())
+            .map(|empty| Span::raw(empty))
+            .take(block.transactions.len())
+            .collect(),
+    };
+
+    txn_spans
+        .into_iter()
+        .zip(receipt_spans)
+        .map(|(txn, receipt)| ListItem::new(Spans::from(vec![txn, Span::raw(" "), receipt])))
+        .collect()
 }
 
 #[derive(Copy, Clone)]
@@ -389,6 +442,9 @@ struct TUI {
     txn_columns: Vec<Column<Transaction>>,
     txn_column_len: usize,
 
+    receipt_columns: Vec<Column<TransactionReceipt>>,
+    _receipt_column_len: usize,
+
     columns: Vec<Column<EthBlock<TxHash>>>,
     column_items_len: usize,
 
@@ -398,6 +454,8 @@ struct TUI {
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, ArcFetchTxns>,
     highest_block: Arc<Mutex<Option<u64>>>,
+
+    block_receipts: HashMap<u64, ArcFetchReceipts>,
 }
 
 fn list_state_with_selection(selection: Option<usize>) -> ListState {
@@ -453,6 +511,9 @@ impl TUI {
         let columns = default_columns();
         let column_items_len = columns.len();
 
+        let receipt_columns = default_receipt_columns();
+        let receipt_column_len = receipt_columns.len();
+
         TUI {
             block_list_state: ListState::default(),
             block_list_height: None,
@@ -472,9 +533,13 @@ impl TUI {
             columns: columns,
             column_items_len: column_items_len,
 
+            receipt_columns: receipt_columns,
+            _receipt_column_len: receipt_column_len,
+
             blocks: VecDeque::new(),
             blocks_to_txns: HashMap::new(),
             highest_block: Arc::new(Mutex::new(None)),
+            block_receipts: HashMap::new(),
         }
     }
 
@@ -604,6 +669,7 @@ impl TUI {
         // TODO(2021-09-10) we should also update blocks_to_txns when we detect a
         //                  reorg
         let block_num = block.number.unwrap().low_u64();
+
         let new_fetch = block_fetcher.fetch_block(block_num);
         self.blocks.push_front(new_fetch);
 
@@ -693,7 +759,6 @@ impl TUI {
                 .blocks
                 .iter()
                 .map(|block_request| {
-                    //TODO there has to be a better way
                     let height = block_request.0;
                     let fetch = block_request.1.lock().unwrap();
 
@@ -701,7 +766,7 @@ impl TUI {
                     let formatted = match &*fetch {
                         Waiting() => format!("{} waiting", height),
                         Started() => format!("{} fetching", height),
-                        Completed(block) => render_block(&self.columns, block),
+                        Completed(block) => render_item_with_cols(&self.columns, block),
                     };
                     ListItem::new(Span::raw(formatted))
                 })
@@ -738,19 +803,30 @@ impl TUI {
             // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
             let block_at_offset = highest_block_number - (offset as u64);
 
-            let arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
+            let block_arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
                 None => {
                     let new_fetch = block_fetcher.fetch_block_with_txns(block_at_offset);
                     debug!("fired new request for block {}", block_at_offset);
-                    self.blocks_to_txns.insert(block_at_offset, new_fetch);
+                    self.blocks_to_txns.insert(block_at_offset, new_fetch.1);
 
                     self.blocks_to_txns.get(&block_at_offset).unwrap()
                 }
                 Some(arcfetch) => arcfetch,
             };
 
+            let receipts_arcfetch = match self.block_receipts.get(&block_at_offset) {
+                None => {
+                    let new_fetch = block_fetcher.fetch_block_receipts(block_at_offset);
+                    debug!("fired new request for block {}", block_at_offset);
+                    self.block_receipts.insert(block_at_offset, new_fetch.1);
+
+                    self.block_receipts.get(&block_at_offset).unwrap()
+                }
+                Some(arcfetch) => arcfetch,
+            };
+
             {
-                let mut fetch = arcfetch.lock().unwrap();
+                let mut block_fetch = block_arcfetch.lock().unwrap();
 
                 // TODO: call block_to_txn_list_items when not inside a critical
                 // section. This is low priority, because by the time we're calling
@@ -760,7 +836,7 @@ impl TUI {
 
                 self.txn_list_length = None;
                 use RequestStatus::*;
-                match &mut *fetch {
+                match &mut *block_fetch {
                     Waiting() => {
                         vec![ListItem::new(Span::raw(format!(
                             "{} waiting",
@@ -774,13 +850,34 @@ impl TUI {
                         )))]
                     }
                     Completed(block) => {
+                        let receipts_fetch = receipts_arcfetch.lock().unwrap();
+
+                        let receipts = if let Completed(receipts) = &*receipts_fetch {
+                            Some(receipts)
+                        } else {
+                            None
+                        };
+
                         self.txn_list_length = Some(block.transactions.len());
-                        block_to_txn_list_items(&self.txn_columns, &block)
+                        block_to_txn_list_items(
+                            &self.txn_columns,
+                            &self.receipt_columns,
+                            &block,
+                            receipts,
+                        )
                     }
                 }
             }
         } else {
             Vec::new()
+        };
+
+        let header = {
+            let mut txn_header: Spans = columns_to_header(&self.txn_columns);
+            let receipt_header: Spans = columns_to_header(&self.receipt_columns);
+            txn_header.0.push(Span::raw(" "));
+            txn_header.0.extend(receipt_header.0);
+            txn_header
         };
 
         let txn_list = HeaderList::new(txn_items)
@@ -791,7 +888,7 @@ impl TUI {
                     .title("Transactions"),
             )
             .highlight_style(Style::default().bg(self.focused_pane.txns_selection_color()))
-            .header(columns_to_header(&self.txn_columns));
+            .header(header);
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
     }
 
@@ -950,38 +1047,40 @@ impl Networking {
         }
     }
 
-    // TODO: return error
-    fn fetch_block(&self, block_number: u64) -> BlockRequest {
-        let new_arc = ArcStatus::default();
-        let sent_arc = new_arc.clone();
-
-        let sent_request = NetworkRequest::Block(BlockRequest(block_number, sent_arc));
-        if let Err(_) = self.network_tx.send(sent_request) {
-            // TODO(2021-09-09): fetch_block() should return a Result
+    fn fetch(&self, request: NetworkRequest) {
+        let cloned = request.clone();
+        if let Err(_) = self.network_tx.send(cloned) {
+            // TODO(2021-09-09): fetch() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
             panic!("remote end closed?");
         }
-
-        BlockRequest(block_number, new_arc)
     }
 
-    fn fetch_block_with_txns(&self, block_number: u64) -> ArcFetchTxns {
-        let new_arc = ArcStatus::default();
-        let sent_arc = new_arc.clone();
+    // TODO a macro is probably not the right solution here but this seems like a good
+    //      spot to practice generating boilerplate with a macro
 
-        if let Err(_) = self
-            .network_tx
-            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(
-                block_number,
-                sent_arc,
-            )))
-        {
-            // TODO(2021-09-09): fetch_block() should return a Result
-            // Can't use expect() or unwrap() b/c SendError does not implement Debug
-            panic!("remote end closed?");
-        }
+    fn fetch_block(&self, block_number: u64) -> BlockRequest {
+        let new_request = BlockRequest::new(block_number);
+        let result = new_request.clone();
 
-        new_arc
+        self.fetch(NetworkRequest::Block(new_request));
+        result
+    }
+
+    fn fetch_block_with_txns(&self, block_number: u64) -> BlockTxnsRequest {
+        let new_request = BlockTxnsRequest::new(block_number);
+        let result = new_request.clone();
+
+        self.fetch(NetworkRequest::BlockWithTxns(new_request));
+        result
+    }
+
+    fn fetch_block_receipts(&self, block_number: u64) -> BlockReceiptsRequest {
+        let new_request = BlockReceiptsRequest::new(block_number);
+        let result = new_request.clone();
+
+        self.fetch(NetworkRequest::BlockReceipts(new_request));
+        result
     }
 }
 
@@ -1053,6 +1152,25 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                     .unwrap();
 
                 arc_fetch.complete(complete_block);
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
+            }
+            NetworkRequest::BlockReceipts(BlockReceiptsRequest(blocknum, arc_fetch)) => {
+                if let Err(err) = arc_fetch.start_if_waiting() {
+                    warn!("arcfetch error: {}", err);
+                    continue;
+                }
+                tx.send(Ok(UIMessage::Refresh())).unwrap();
+
+                let receipts = provider.get_block_receipts(blocknum).await.unwrap();
+
+                if receipts.len() == 0 {
+                    // other branches reproduce this failure mode by calling unwrap(),
+                    // adding a panic here to make failures very visible and prod me to
+                    // handle them the right way
+                    panic!("could not fetch receipts for block");
+                }
+
+                arc_fetch.complete(receipts);
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
         }
