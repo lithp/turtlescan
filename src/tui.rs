@@ -20,10 +20,12 @@ use tui::Frame;
 use std::thread;
 
 use ethers_providers::{JsonRpcClient, Middleware, Provider, Ws};
-use log::debug;
+use log::{debug, warn};
 use std::error::Error;
 use termion::event::Key;
 use termion::input::TermRead;
+
+use simple_error::SimpleError;
 
 use std::collections::{HashMap, VecDeque};
 
@@ -66,62 +68,52 @@ use std::default::Default;
 
 impl<T> Default for ArcStatus<T> {
     fn default() -> Self {
-        ArcStatus(
-            Arc::new(Mutex::new(BlockFetch::Waiting()))
-        )
+        ArcStatus(Arc::new(Mutex::new(BlockFetch::Waiting())))
     }
 }
 
-// TODO: is there a way to drop this redundency?
+use std::sync::LockResult;
+use std::sync::MutexGuard;
+
+impl<T> ArcStatus<T> {
+    // prevents callers from needing to care about .0
+    // if I end up wanting to forward more of these Deref might be the better option
+    fn lock(&self) -> LockResult<MutexGuard<'_, BlockFetch<T>>> {
+        return self.0.lock();
+    }
+
+    /// tell the UI that the request is being handled
+    /// careful, blocks until it can take out a lock!
+    fn start_if_waiting(&self) -> Result<(), SimpleError> {
+        let mut fetch = self.lock().unwrap();
+
+        if let BlockFetch::Waiting() = *fetch {
+            *fetch = BlockFetch::Started();
+            Ok(())
+        } else {
+            Err(SimpleError::new("arc was in the wrong state"))
+        }
+    }
+
+    /// careful, blocks until it can take out a lock
+    /// overwrites anything which was previously in here
+    fn complete(&self, result: T) {
+        let mut fetch = self.lock().unwrap();
+        *fetch = BlockFetch::Completed(result);
+    }
+}
+
 type ArcFetch = ArcStatus<EthBlock<TxHash>>;
 type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
 
 struct BlockRequest(u32, ArcFetch);
 struct BlockTxnsRequest(u32, ArcFetchTxns);
 
-// TODO: I think these layers are in the wrong order
 enum NetworkRequest {
     // wrapping b/c it is not possible to use an enum variant as a type...
     Block(BlockRequest),
     BlockWithTxns(BlockTxnsRequest),
 }
-
-// take 3:
-//
-// how do you incrementally switch over to the new defs?
-// this will be the final def, but I was to get here by slowing changing the above defs
-
-enum RequestStatus<T> {
-    Waiting(),
-    Started(),
-    Completed(T),
-}
-
-// struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
-type ArcBlockFetch = ArcStatus<EthBlock<TxHash>>;
-type ArcBlockTxnsFetch = ArcStatus<EthBlock<Transaction>>;
-
-enum Request {
-    Block(u32, ArcStatus<EthBlock<TxHash>>),
-    BlockWithTxns(u32, ArcStatus<EthBlock<Transaction>>),
-}
-
-
-/*
- * This is what we already have, w some minor tweaks
- *
- * networking:
- * loop {
- *    let request = rx.recv().await
- *
- *    match request {
- *        let id = request.block_id
- *        request.start()
- *        let res = provider.fetch(id)
- *        request.complete(res)
- *    }
- * }
- */
 
 struct Column<T> {
     name: &'static str,
@@ -703,7 +695,7 @@ impl TUI {
                 .map(|block_request| {
                     //TODO there has to be a better way
                     let height = block_request.0;
-                    let fetch = block_request.1.0.lock().unwrap();
+                    let fetch = block_request.1.lock().unwrap();
 
                     use BlockFetch::*;
                     let formatted = match &*fetch {
@@ -758,7 +750,7 @@ impl TUI {
             };
 
             {
-                let mut fetch = arcfetch.0.lock().unwrap();
+                let mut fetch = arcfetch.lock().unwrap();
 
                 // TODO: call block_to_txn_list_items when not inside a critical
                 // section. This is low priority, because by the time we're calling
@@ -770,10 +762,16 @@ impl TUI {
                 use BlockFetch::*;
                 match &mut *fetch {
                     Waiting() => {
-                        vec![ListItem::new(Span::raw(format!("{} waiting", block_at_offset)))]
+                        vec![ListItem::new(Span::raw(format!(
+                            "{} waiting",
+                            block_at_offset
+                        )))]
                     }
                     Started() => {
-                        vec![ListItem::new(Span::raw(format!("{} fetching", block_at_offset)))]
+                        vec![ListItem::new(Span::raw(format!(
+                            "{} fetching",
+                            block_at_offset
+                        )))]
                     }
                     Completed(block) => {
                         self.txn_list_length = Some(block.transactions.len());
@@ -973,7 +971,10 @@ impl Networking {
 
         if let Err(_) = self
             .network_tx
-            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, sent_arc)))
+            .send(NetworkRequest::BlockWithTxns(BlockTxnsRequest(
+                block_number,
+                sent_arc,
+            )))
         {
             // TODO(2021-09-09): fetch_block() should return a Result
             // Can't use expect() or unwrap() b/c SendError does not implement Debug
@@ -1023,60 +1024,37 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
     loop {
         let request = network_rx.recv().await.unwrap(); // blocks until we have more input
 
-        // TODO(2021-09-10): some gnarly logic duplication
         match request {
-            //TODO any way to get rid of this verbose nesting?
             NetworkRequest::Block(BlockRequest(block_number, arc_fetch)) => {
-                let block_number = {
-                    // we're blocking the thread but these critical sections are kept as short as
-                    // possible (here and elsewhere in the program)
-                    let mut fetch = arc_fetch.0.lock().unwrap();
-
-                    if let BlockFetch::Waiting() = *fetch {
-                        // tell the UI we're handling this fetch
-                        *fetch = BlockFetch::Started();
-
-                        block_number
-                    } else {
-                        continue;
-                    }
-                } as u64;
+                if let Err(err) = arc_fetch.start_if_waiting() {
+                    warn!("arcfetch error: {}", err);
+                    continue;
+                }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
 
+                // it was a u32, not sure why this doesn't happen automatically
+                let block_number: u64 = block_number.into();
                 let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
 
-                {
-                    let mut fetch = arc_fetch.0.lock().unwrap();
-                    *fetch = BlockFetch::Completed(complete_block);
-                }
+                arc_fetch.complete(complete_block);
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
             NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, arc_fetch)) => {
-                let block_number = {
-                    let mut fetch = arc_fetch.0.lock().unwrap();
-
-                    if let BlockFetch::Waiting() = *fetch {
-                        *fetch = BlockFetch::Started();
-
-                        block_number
-                    } else {
-                        continue;
-                    }
-                } as u64;
+                if let Err(err) = arc_fetch.start_if_waiting() {
+                    warn!("arcfetch error: {}", err);
+                    continue;
+                }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
 
                 // the first unwrap is b/c the network request might have failed
                 // the second unwrap is b/c the requested block number might not exist
                 let complete_block = provider
-                    .get_block_with_txs(block_number)
+                    .get_block_with_txs(block_number as u64)
                     .await
                     .unwrap()
                     .unwrap();
 
-                {
-                    let mut fetch = arc_fetch.0.lock().unwrap();
-                    *fetch = BlockFetch::Completed(complete_block);
-                }
+                arc_fetch.complete(complete_block);
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
             }
         }
