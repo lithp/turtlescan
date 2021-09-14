@@ -106,8 +106,8 @@ impl<T> ArcStatus<T> {
 type ArcFetch = ArcStatus<EthBlock<TxHash>>;
 type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
 
-struct BlockRequest(u32, ArcFetch);
-struct BlockTxnsRequest(u32, ArcFetchTxns);
+struct BlockRequest(u64, ArcFetch);
+struct BlockTxnsRequest(u64, ArcFetchTxns);
 
 enum NetworkRequest {
     // wrapping b/c it is not possible to use an enum variant as a type...
@@ -396,8 +396,8 @@ struct TUI {
     blocks: VecDeque<BlockRequest>,
 
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
-    blocks_to_txns: HashMap<u32, ArcFetchTxns>,
-    highest_block: Arc<Mutex<Option<u32>>>,
+    blocks_to_txns: HashMap<u64, ArcFetchTxns>,
+    highest_block: Arc<Mutex<Option<u64>>>,
 }
 
 fn list_state_with_selection(selection: Option<usize>) -> ListState {
@@ -603,7 +603,7 @@ impl TUI {
         //                  insert this block fetch into the correct location
         // TODO(2021-09-10) we should also update blocks_to_txns when we detect a
         //                  reorg
-        let block_num = block.number.unwrap().low_u32();
+        let block_num = block.number.unwrap().low_u64();
         let new_fetch = block_fetcher.fetch_block(block_num);
         self.blocks.push_front(new_fetch);
 
@@ -681,7 +681,7 @@ impl TUI {
             };
             let new_fetch = block_fetcher.fetch_block(
                 // TODO: if the chain is very young this could underflow
-                highest_block_number - self.blocks.len() as u32,
+                highest_block_number - self.blocks.len() as u64,
             );
             self.blocks.push_back(new_fetch);
         }
@@ -736,7 +736,7 @@ impl TUI {
                 block_number_opt.unwrap()
             };
             // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
-            let block_at_offset = highest_block_number - (offset as u32);
+            let block_at_offset = highest_block_number - (offset as u64);
 
             let arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
                 None => {
@@ -934,7 +934,7 @@ struct Networking {
 impl Networking {
     fn start(
         provider: Provider<Ws>, // Ws is required because we watch for new blocks
-        highest_block: Arc<Mutex<Option<u32>>>,
+        highest_block: Arc<Mutex<Option<u64>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     ) -> Networking {
         let (network_tx, mut network_rx) = tokio_mpsc::unbounded_channel();
@@ -951,7 +951,7 @@ impl Networking {
     }
 
     // TODO: return error
-    fn fetch_block(&self, block_number: u32) -> BlockRequest {
+    fn fetch_block(&self, block_number: u64) -> BlockRequest {
         let new_arc = ArcStatus::default();
         let sent_arc = new_arc.clone();
 
@@ -965,7 +965,7 @@ impl Networking {
         BlockRequest(block_number, new_arc)
     }
 
-    fn fetch_block_with_txns(&self, block_number: u32) -> ArcFetchTxns {
+    fn fetch_block_with_txns(&self, block_number: u64) -> ArcFetchTxns {
         let new_arc = ArcStatus::default();
         let sent_arc = new_arc.clone();
 
@@ -992,7 +992,7 @@ async fn run_networking(
      * TODO(2021-09-14) document this limitation somewhere visible
      */
     provider: Provider<Ws>,
-    highest_block: Arc<Mutex<Option<u32>>>,
+    highest_block: Arc<Mutex<Option<u64>>>,
     tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     network_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
 ) {
@@ -1002,7 +1002,7 @@ async fn run_networking(
         Err(error) => debug!("{:}", error),
         Ok(number) => {
             let mut block_number = highest_block.lock().unwrap();
-            *block_number = Some(number.low_u32());
+            *block_number = Some(number.low_u64());
         }
     }
     tx.send(Ok(UIMessage::Refresh())).unwrap();
@@ -1032,8 +1032,6 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 }
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
 
-                // it was a u32, not sure why this doesn't happen automatically
-                let block_number: u64 = block_number.into();
                 let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
 
                 arc_fetch.complete(complete_block);
@@ -1049,7 +1047,7 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
                 // the first unwrap is b/c the network request might have failed
                 // the second unwrap is b/c the requested block number might not exist
                 let complete_block = provider
-                    .get_block_with_txs(block_number as u64)
+                    .get_block_with_txs(block_number)
                     .await
                     .unwrap()
                     .unwrap();
