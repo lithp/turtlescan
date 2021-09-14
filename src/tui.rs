@@ -323,15 +323,15 @@ impl FocusedPane {
     }
 }
 
+const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
+
 struct TUI {
     /* UI state */
     block_list_state: ListState,
-    block_list_height: Option<u16>,
+    block_list_height: Option<usize>,
 
     column_list_state: ListState,
 
-    // TODO(2021-09-11) I've written this scroll code three times now and it's finally
-    //                  becoming tedious, this needs to be pulled out into a struct
     txn_list_state: ListState,
     txn_list_length: Option<usize>,
 
@@ -357,6 +357,45 @@ fn list_state_with_selection(selection: Option<usize>) -> ListState {
     let mut res = ListState::default();
     res.select(selection);
     res
+}
+
+fn scroll_up_one(state: &mut ListState, item_count: usize) {
+    if item_count == 0 {
+        state.select(None);
+        return;
+    }
+
+    match state.selected() {
+        // this is exhaustive because usize cannot be negative
+        None | Some(0) => {
+            state.select(Some(item_count - 1));
+        }
+        Some(current_selection) => state.select(Some(current_selection - 1)),
+    }
+}
+
+fn scroll_down_one(state: &mut ListState, item_count: usize) {
+    let desired_state = state.selected().map(|i| i + 1).unwrap_or(0);
+    state.select(desired_state.checked_rem(item_count));
+
+    // the above two-liner is cute but the code below is probably better:
+
+    /*
+    match state.selected() {
+        None => {
+            state.select(Some(0));
+        }
+        Some(current_selection) => {
+            if item_count == 0 {
+                state.select(None);
+            } else if current_selection >= item_count - 1 {
+                state.select(Some(0));
+            } else {
+                state.select(Some(current_selection + 1))
+            }
+        }
+    }
+    */
 }
 
 impl TUI {
@@ -424,20 +463,11 @@ impl TUI {
         match self.configuring_columns {
             false => match self.focused_pane {
                 FocusedPane::Blocks() => {
-                    if let Some(height) = self.block_list_height {
-                        match self.block_list_state.selected() {
-                            None => {
-                                self.block_list_state.select(Some((height - 3).into()));
-                            }
-                            Some(i) => {
-                                if i <= 0 {
-                                    self.block_list_state.select(Some((height - 3).into()));
-                                } else {
-                                    self.block_list_state.select(Some(i - 1));
-                                }
-                            }
-                        }
-                    }
+                    let item_count = self
+                        .block_list_height
+                        .unwrap_or(0)
+                        .saturating_sub(BLOCK_LIST_BORDER_HEIGHT);
+                    scroll_up_one(&mut self.block_list_state, item_count);
 
                     // it doesn't make sense to persist this if we're looking at
                     // txns for a new block. In the far future maybe this should
@@ -445,115 +475,41 @@ impl TUI {
                     self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions() => {
-                    match self.txn_list_state.selected() {
-                        None => {
-                            match self.txn_list_length {
-                                None => {} // there is nothing to select
-                                Some(txn_count) => {
-                                    // the last item
-                                    self.txn_list_state.select(Some(txn_count - 1));
-                                }
-                            }
-                        }
-
-                        Some(current_selection) => {
-                            match self.txn_list_length {
-                                None => {
-                                    self.txn_list_state.select(None);
-                                }
-                                // TODO: I don't think this correctly handles the
-                                //       case where the list of txns has changed
-                                //       out from under us
-                                Some(txn_count) => {
-                                    if current_selection == 0 {
-                                        self.txn_list_state.select(Some(txn_count - 1));
-                                    } else {
-                                        self.txn_list_state.select(Some(current_selection - 1));
-                                    }
-                                }
-                            }
-                        }
-                    };
+                    let item_count = self.txn_list_length.unwrap_or(0);
+                    scroll_up_one(&mut self.txn_list_state, item_count);
                 }
             },
-            true => match self.column_list_state.selected() {
-                None | Some(0) => {
-                    self.column_list_state.select(Some(self.column_count() - 1));
-                }
-                Some(i) => {
-                    self.column_list_state.select(Some(i - 1));
-                }
-            },
+            true => {
+                let item_count = self.column_count();
+                scroll_up_one(&mut self.column_list_state, item_count);
+            }
         };
     }
 
     fn handle_key_down(&mut self) {
         match self.configuring_columns {
+            true => {
+                let col_count = self.column_count();
+                scroll_down_one(&mut self.column_list_state, col_count);
+            }
             false => match self.focused_pane {
                 FocusedPane::Blocks() => {
-                    match self.block_list_state.selected() {
-                        None => {
-                            self.block_list_state.select(Some(0));
-                        }
-                        Some(i) => {
-                            // NB. this duplicates logic found in  NewBlock(), any changes
-                            //     here likely also need to be applied there
-                            if let Some(height) = self.block_list_height {
-                                if i >= (height - 3).into() {
-                                    self.block_list_state.select(Some(0));
-                                } else {
-                                    self.block_list_state.select(Some(i + 1));
-                                }
-                            }
-                        }
-                    }
+                    let item_count = self
+                        .block_list_height
+                        .unwrap_or(0)
+                        .saturating_sub(BLOCK_LIST_BORDER_HEIGHT);
+                    scroll_down_one(&mut self.block_list_state, item_count);
 
                     // it doesn't make sense to persist this if we're looking at txns
-                    // for a new block
+                    // for a new block.
+                    // TODO(bug): techincally we should not throw away the state if the
+                    // selection did not change, such as if there is only one block in
+                    // the list
                     self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions() => {
-                    // scroll down
-                    match self.txn_list_state.selected() {
-                        None => {
-                            match self.txn_list_length {
-                                None | Some(0) => {} // there is nothing to select
-                                Some(_txn_count) => {
-                                    self.txn_list_state.select(Some(0));
-                                }
-                            }
-                        }
-
-                        Some(current_selection) => {
-                            match self.txn_list_length {
-                                None | Some(0) => {
-                                    self.txn_list_state.select(None);
-                                }
-                                // TODO: I don't think this correctly handles the
-                                //       case where the list of txns has changed
-                                //       out from under us
-                                Some(txn_count) => {
-                                    if current_selection >= txn_count - 1 {
-                                        self.txn_list_state.select(Some(0));
-                                    } else {
-                                        self.txn_list_state.select(Some(current_selection + 1));
-                                    }
-                                }
-                            }
-                        }
-                    };
-                }
-            },
-            true => match self.column_list_state.selected() {
-                None => {
-                    self.column_list_state.select(Some(0));
-                }
-                Some(i) => {
-                    if i >= self.column_count() - 1 {
-                        self.column_list_state.select(Some(0));
-                    } else {
-                        self.column_list_state.select(Some(i + 1));
-                    }
+                    let item_count = self.txn_list_length.unwrap_or(0);
+                    scroll_down_one(&mut self.txn_list_state, item_count);
                 }
             },
         };
@@ -611,13 +567,11 @@ impl TUI {
         // when a new block comes in we want the same block to remain selected,
         // unless we're already at the end of the list
         match self.block_list_state.selected() {
-            // NB. this duplicates logic found in Key::Down, any changes should
-            //      be made there as well
             None => {} // there is no selection to update
             Some(i) => {
                 if let Some(height) = self.block_list_height {
                     // if there is a populated block list to scroll (there is)
-                    if i < (height - 3).into() {
+                    if i < (height - BLOCK_LIST_BORDER_HEIGHT).into() {
                         // if we're not already at the end of the list
                         self.block_list_state.select(Some(i + 1));
                     } else {
@@ -656,6 +610,135 @@ impl TUI {
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
     }
 
+    fn draw_block_list<B: Backend>(
+        &mut self,
+        frame: &mut Frame<B>,
+        area: Rect,
+        block_fetcher: &Networking,
+    ) {
+        let target_height = area.height;
+        let target_height = {
+            // the border consumes 2 lines
+            if target_height > 2 {
+                target_height - 2
+            } else {
+                target_height
+            }
+        };
+
+        // the size we will give the block list widget
+        while target_height > self.blocks.len() as u16 {
+            let highest_block_number = {
+                let block_number_opt = self.highest_block.lock().unwrap();
+                block_number_opt.unwrap()
+            };
+            let new_fetch = block_fetcher.fetch_block(
+                // TODO: if the chain is very young this could underflow
+                highest_block_number - self.blocks.len() as u32,
+            );
+            self.blocks.push_back(new_fetch);
+        }
+
+        let header = columns_to_header(&self.columns);
+
+        let block_lines = {
+            let block_lines: Vec<ListItem> = self
+                .blocks
+                .iter()
+                .map(|arcfetch| {
+                    let fetch = arcfetch.lock().unwrap();
+
+                    use BlockFetch::*;
+                    let formatted = match &*fetch {
+                        Waiting(height) => format!("{} waiting", height),
+                        Started(height) => format!("{} fetching", height),
+                        Completed(block) => render_block(&self.columns, block),
+                    };
+                    ListItem::new(Span::raw(formatted))
+                })
+                .collect();
+            block_lines
+        };
+
+        let block_list = HeaderList::new(block_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.focused_pane.blocks_border_color()))
+                    .title("Blocks"),
+            )
+            .highlight_style(Style::default().bg(self.focused_pane.blocks_selection_color()))
+            .header(header);
+        frame.render_stateful_widget(block_list, area, &mut self.block_list_state);
+
+        // TODO: will this ever panic? u16 into a usize
+        self.block_list_height = Some(area.height.into());
+    }
+
+    fn draw_txn_list<B: Backend>(
+        &mut self,
+        frame: &mut Frame<B>,
+        area: Rect,
+        block_fetcher: &Networking,
+    ) {
+        let txn_items = if let Some(offset) = self.block_list_state.selected() {
+            let highest_block_number = {
+                let block_number_opt = self.highest_block.lock().unwrap();
+                block_number_opt.unwrap()
+            };
+            let block_at_offset = highest_block_number - (offset as u32);
+
+            let arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
+                None => {
+                    let new_fetch = block_fetcher.fetch_block_with_txns(block_at_offset);
+                    debug!("fired new request for block {}", block_at_offset);
+                    self.blocks_to_txns.insert(block_at_offset, new_fetch);
+
+                    self.blocks_to_txns.get(&block_at_offset).unwrap()
+                }
+                Some(arcfetch) => arcfetch,
+            };
+
+            {
+                let mut fetch = arcfetch.lock().unwrap();
+
+                // TODO: call block_to_txn_list_items when not inside a critical
+                // section. This is low priority, because by the time we're calling
+                // block_to_txn_list_items we're the only thread trying to
+                // access this block, we only have it because the networking
+                // thread has finished.
+
+                self.txn_list_length = None;
+                use BlockFetch::*;
+                match &mut *fetch {
+                    Waiting(height) => {
+                        vec![ListItem::new(Span::raw(format!("{} waiting", height)))]
+                    }
+                    Started(height) => {
+                        vec![ListItem::new(Span::raw(format!("{} fetching", height)))]
+                    }
+                    Completed(block) => {
+                        self.txn_list_length = Some(block.transactions.len());
+                        block_to_txn_list_items(&self.txn_columns, &block)
+                    }
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        let txn_list = HeaderList::new(txn_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.focused_pane.txns_border_color()))
+                    .title("Transactions"),
+            )
+            .highlight_style(Style::default().bg(self.focused_pane.txns_selection_color()))
+            .header(columns_to_header(&self.txn_columns));
+        frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
+    }
+
     fn draw<B: Backend>(&mut self, frame: &mut Frame<B>, block_fetcher: &Networking) {
         let waiting_for_initial_block = {
             let block_number_opt = self.highest_block.lock().unwrap();
@@ -684,127 +767,16 @@ impl TUI {
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(vert_chunks[0]);
 
-            let target_height = vert_chunks[0].height;
-            let target_height = {
-                // the border consumes 2 lines
-                if target_height > 2 {
-                    target_height - 2
-                } else {
-                    target_height
-                }
-            };
-
-            // the size we will give the block list widget
-            while target_height > self.blocks.len() as u16 {
-                let highest_block_number = {
-                    let block_number_opt = self.highest_block.lock().unwrap();
-                    block_number_opt.unwrap()
-                };
-                let new_fetch = block_fetcher.fetch_block(
-                    // TODO: if the chain is very young this could underflow
-                    highest_block_number - self.blocks.len() as u32,
-                );
-                self.blocks.push_back(new_fetch);
-            }
-
-            let header = columns_to_header(&self.columns);
-
-            let block_lines = {
-                let block_lines: Vec<ListItem> = self
-                    .blocks
-                    .iter()
-                    .map(|arcfetch| {
-                        let fetch = arcfetch.lock().unwrap();
-
-                        use BlockFetch::*;
-                        let formatted = match &*fetch {
-                            Waiting(height) => format!("{} waiting", height),
-                            Started(height) => format!("{} fetching", height),
-                            Completed(block) => render_block(&self.columns, block),
-                        };
-                        ListItem::new(Span::raw(formatted))
-                    })
-                    .collect();
-                block_lines
-            };
-
             let block_list_chunk = if self.showing_transactions {
                 horiz_chunks[0]
             } else {
                 vert_chunks[0]
             };
 
-            let block_list = HeaderList::new(block_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(self.focused_pane.blocks_border_color()))
-                        .title("Blocks"),
-                )
-                .highlight_style(Style::default().bg(self.focused_pane.blocks_selection_color()))
-                .header(header);
-            frame.render_stateful_widget(block_list, block_list_chunk, &mut self.block_list_state);
-            self.block_list_height = Some(vert_chunks[0].height);
+            self.draw_block_list(frame, block_list_chunk, block_fetcher);
 
             if self.showing_transactions {
-                let txn_items = if let Some(offset) = self.block_list_state.selected() {
-                    let highest_block_number = {
-                        let block_number_opt = self.highest_block.lock().unwrap();
-                        block_number_opt.unwrap()
-                    };
-                    let block_at_offset = highest_block_number - (offset as u32);
-
-                    let arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
-                        None => {
-                            let new_fetch = block_fetcher.fetch_block_with_txns(block_at_offset);
-                            debug!("fired new request for block {}", block_at_offset);
-                            self.blocks_to_txns.insert(block_at_offset, new_fetch);
-
-                            self.blocks_to_txns.get(&block_at_offset).unwrap()
-                        }
-                        Some(arcfetch) => arcfetch,
-                    };
-
-                    {
-                        let mut fetch = arcfetch.lock().unwrap();
-
-                        // TODO: call block_to_txn_list_items when not inside a critical
-                        // section. This is low priority, because by the time we're calling
-                        // block_to_txn_list_items we're the only thread trying to
-                        // access this block, we only have it because the networking
-                        // thread has finished.
-
-                        self.txn_list_length = None;
-                        use BlockFetch::*;
-                        match &mut *fetch {
-                            Waiting(height) => {
-                                vec![ListItem::new(Span::raw(format!("{} waiting", height)))]
-                            }
-                            Started(height) => {
-                                vec![ListItem::new(Span::raw(format!("{} fetching", height)))]
-                            }
-                            Completed(block) => {
-                                self.txn_list_length = Some(block.transactions.len());
-                                block_to_txn_list_items(&self.txn_columns, &block)
-                            }
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                let txn_list = HeaderList::new(txn_items)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(
-                                Style::default().fg(self.focused_pane.txns_border_color()),
-                            )
-                            .title("Transactions"),
-                    )
-                    .highlight_style(Style::default().bg(self.focused_pane.txns_selection_color()))
-                    .header(columns_to_header(&self.txn_columns));
-                frame.render_stateful_widget(txn_list, horiz_chunks[1], &mut self.txn_list_state);
+                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
             }
 
             let bold_title =
