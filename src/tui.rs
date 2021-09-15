@@ -1214,9 +1214,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 }
 
 struct Database {
-    _bg_thread: thread::JoinHandle<()>,
     network_tx: tokio_mpsc::UnboundedSender<NetworkRequest>, // tell network what to fetch
-    // network_rx: mpsc::Receiver<ArcFetch>,
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, ArcFetchTxns>,
@@ -1237,14 +1235,13 @@ impl Database {
 
         // no real need to hold onto this handle, the thread will be killed when this main
         // thread exits.
-        let handle = thread::spawn(move || {
+        let _handle: thread::JoinHandle<()> = thread::spawn(move || {
             run_networking(provider, highest_block_send, tx, &mut network_rx);
         });
 
         Database {
-            _bg_thread: handle,
             network_tx: network_tx,
-            // network_rx: network_rx,
+
             highest_block: highest_block,
             blocks: VecDeque::new(),
             blocks_to_txns: HashMap::new(),
