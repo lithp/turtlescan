@@ -54,6 +54,7 @@ enum UIMessage {
     NewBlock(EthBlock<TxHash>),
 }
 
+#[derive(Clone)]
 enum RequestStatus<T> {
     Waiting(),
     Started(),
@@ -797,7 +798,7 @@ impl<'a> TUI<'a> {
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
     }
 
-    fn txn_list_selected_txn(&self) -> Option<H256> {
+    fn txn_list_selected_txn(&mut self) -> Option<H256> {
         let selected_block: Option<u64> = self.block_list_selected_block();
 
         if let None = selected_block {
@@ -805,30 +806,22 @@ impl<'a> TUI<'a> {
         }
         let selected_block: u64 = selected_block.unwrap();
 
-        let blockarc = self.database.blocks_to_txns.get(&selected_block);
-        if let None = blockarc {
-            // TODO: this might warrant a warn!(), I don't think it's possible
-            return None;
-        }
-        let blockarc = blockarc.unwrap();
+        let fetch = self.database.get_block_with_transactions(selected_block);
 
         use RequestStatus::*;
 
         match self.txn_list_state.selected() {
             None => None,
-            Some(offset) => {
-                let fetch = blockarc.lock().unwrap();
-                match &*fetch {
-                    Waiting() | Started() => return None,
-                    Completed(block) => {
-                        if offset >= block.transactions.len() {
-                            panic!("inconsistent state");
-                        }
-
-                        return Some(block.transactions[offset].hash);
+            Some(offset) => match fetch {
+                Waiting() | Started() => return None,
+                Completed(block) => {
+                    if offset >= block.transactions.len() {
+                        panic!("inconsistent state");
                     }
+
+                    return Some(block.transactions[offset].hash);
                 }
-            }
+            },
         }
     }
 
@@ -924,8 +917,7 @@ impl<'a> TUI<'a> {
         }
     }
 
-    // nb this is not given a block_fetcher so it cannot fire off requests
-    fn txn_list_title(&self) -> String {
+    fn txn_list_title(&mut self) -> String {
         //TODO(2021-09-14) ick! how can you make this simpler?
         enum State {
             Ready,
@@ -934,43 +926,24 @@ impl<'a> TUI<'a> {
         }
         use State::*;
 
-        let state = || {
+        let mut state = || {
             let block = self.block_list_selected_block();
             if let None = block {
                 return Ready;
             }
             let block = block.unwrap();
 
-            let blockarc = self.database.blocks_to_txns.get(&block);
-            if let None = blockarc {
-                return Ready;
-            }
-            let blockarc = blockarc.unwrap();
-
-            {
-                use RequestStatus::*;
-
-                let fetch = blockarc.lock().unwrap();
-                match *fetch {
-                    Waiting() | Started() => return FetchingTxns,
-                    Completed(_) => (),
-                }
+            use RequestStatus::*;
+            let blockfetch = self.database.get_block_with_transactions(block);
+            match blockfetch {
+                Waiting() | Started() => return FetchingTxns,
+                Completed(_) => (),
             }
 
-            let receiptsarc = self.database.block_receipts.get(&block);
-            if let None = receiptsarc {
-                return FetchingReceipts;
-            }
-            let receiptsarc = receiptsarc.unwrap();
-
-            {
-                use RequestStatus::*;
-
-                let fetch = receiptsarc.lock().unwrap();
-                match *fetch {
-                    Waiting() | Started() => return FetchingReceipts,
-                    Completed(_) => return Ready,
-                }
+            let receiptsfetch = self.database.get_block_receipts(block);
+            match receiptsfetch {
+                Waiting() | Started() => return FetchingReceipts,
+                Completed(_) => return Ready,
             }
         };
 
@@ -985,74 +958,39 @@ impl<'a> TUI<'a> {
         let block_selection = self.block_list_selected_block();
 
         let txn_items = if let Some(block_at_offset) = block_selection {
-            let block_arcfetch = match self.database.blocks_to_txns.get(&block_at_offset) {
-                None => {
-                    let new_fetch = self.database.fetch_block_with_txns(block_at_offset);
-                    debug!("fired new request for block {}", block_at_offset);
-                    self.database
-                        .blocks_to_txns
-                        .insert(block_at_offset, new_fetch.1);
+            let block_fetch = self.database.get_block_with_transactions(block_at_offset);
+            let receipts_fetch = self.database.get_block_receipts(block_at_offset);
 
-                    self.database.blocks_to_txns.get(&block_at_offset).unwrap()
+            self.txn_list_length = None;
+            use RequestStatus::*;
+            match block_fetch {
+                Waiting() => {
+                    vec![ListItem::new(Span::raw(format!(
+                        "{} waiting",
+                        block_at_offset
+                    )))]
                 }
-                Some(arcfetch) => arcfetch,
-            };
-
-            let receipts_arcfetch = match self.database.block_receipts.get(&block_at_offset) {
-                None => {
-                    let new_fetch = self.database.fetch_block_receipts(block_at_offset);
-                    debug!("fired new request for block {}", block_at_offset);
-                    self.database
-                        .block_receipts
-                        .insert(block_at_offset, new_fetch.1);
-
-                    self.database.block_receipts.get(&block_at_offset).unwrap()
+                Started() => {
+                    vec![ListItem::new(Span::raw(format!(
+                        "{} fetching",
+                        block_at_offset
+                    )))]
                 }
-                Some(arcfetch) => arcfetch,
-            };
+                Completed(block) => {
+                    let receipts: Option<&Vec<TransactionReceipt>> =
+                        if let Completed(ref receipts) = receipts_fetch {
+                            Some(receipts)
+                        } else {
+                            None
+                        };
 
-            {
-                let mut block_fetch = block_arcfetch.lock().unwrap();
-
-                // TODO: call block_to_txn_list_items when not inside a critical
-                // section. This is low priority, because by the time we're calling
-                // block_to_txn_list_items we're the only thread trying to
-                // access this block, we only have it because the networking
-                // thread has finished.
-
-                self.txn_list_length = None;
-                use RequestStatus::*;
-                match &mut *block_fetch {
-                    Waiting() => {
-                        vec![ListItem::new(Span::raw(format!(
-                            "{} waiting",
-                            block_at_offset
-                        )))]
-                    }
-                    Started() => {
-                        vec![ListItem::new(Span::raw(format!(
-                            "{} fetching",
-                            block_at_offset
-                        )))]
-                    }
-                    Completed(block) => {
-                        let receipts_fetch = receipts_arcfetch.lock().unwrap();
-
-                        let receipts: Option<&Vec<TransactionReceipt>> =
-                            if let Completed(receipts) = &*receipts_fetch {
-                                Some(receipts)
-                            } else {
-                                None
-                            };
-
-                        self.txn_list_length = Some(block.transactions.len());
-                        block_to_txn_list_items(
-                            &self.txn_columns,
-                            &self.receipt_columns,
-                            &block,
-                            receipts,
-                        )
-                    }
+                    self.txn_list_length = Some(block.transactions.len());
+                    block_to_txn_list_items(
+                        &self.txn_columns,
+                        &self.receipt_columns,
+                        &block,
+                        receipts,
+                    )
                 }
             }
         } else {
@@ -1367,6 +1305,44 @@ impl Database {
         let highest_block_opt = self.highest_block.lock().unwrap();
         highest_block_opt.clone()
     }
+
+    fn get_block_with_transactions(
+        &mut self,
+        blocknum: u64,
+    ) -> RequestStatus<EthBlock<Transaction>> {
+        let arcfetch = match self.blocks_to_txns.get(&blocknum) {
+            None => {
+                let new_fetch = self.fetch_block_with_txns(blocknum);
+
+                debug!("fired new request for txns for block {}", blocknum);
+                self.blocks_to_txns.insert(blocknum, new_fetch.1);
+
+                self.blocks_to_txns.get(&blocknum).unwrap()
+            }
+            Some(arcfetch) => arcfetch,
+        };
+
+        let blockfetch = arcfetch.lock().unwrap();
+        blockfetch.clone()
+    }
+
+    // TODO: this is a lot of copying, is that really okay?
+    fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>> {
+        let arcfetch = match self.block_receipts.get(&blocknum) {
+            None => {
+                let new_fetch = self.fetch_block_receipts(blocknum);
+
+                debug!("fired new request for txns for block {}", blocknum);
+                self.block_receipts.insert(blocknum, new_fetch.1);
+
+                self.block_receipts.get(&blocknum).unwrap()
+            }
+            Some(arcfetch) => arcfetch,
+        };
+
+        let fetch = arcfetch.lock().unwrap();
+        fetch.clone()
+    }
 }
 
 #[tokio::main(worker_threads = 1)]
@@ -1530,7 +1506,7 @@ fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
     width + spaces
 }
 
-fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans {
+fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans<'static> {
     let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
     Spans::from(
         columns
