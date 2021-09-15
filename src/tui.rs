@@ -502,6 +502,7 @@ struct TUI {
     column_items_len: usize,
 
     /* shared state */
+
     blocks: VecDeque<BlockRequest>,
 
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
