@@ -804,14 +804,7 @@ impl<'a> TUI<'a> {
             }
         };
 
-        {
-            let mut highest_block_number_opt = self.database.highest_block.lock().unwrap();
-            if let Some(highest_block_number) = *highest_block_number_opt {
-                if block_num > highest_block_number {
-                    *highest_block_number_opt = Some(block_num);
-                }
-            }
-        }
+        self.database.set_highest_block(block_num);
     }
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
@@ -898,10 +891,11 @@ impl<'a> TUI<'a> {
 
         // the size we will give the block list widget
         while target_height > self.blocks.len() as u16 {
-            let highest_block_number = {
-                let block_number_opt = self.database.highest_block.lock().unwrap();
-                block_number_opt.unwrap()
-            };
+
+            // unwrapping is safe because the tui does not render until the network first
+            // fetches the higest block, and the highest block is never set back to None
+            let highest_block_number = self.database.get_highest_block().unwrap();
+
             let new_fetch = self.database.fetch_block(
                 // TODO: if the chain is very young this could underflow
                 highest_block_number - self.blocks.len() as u64,
@@ -950,17 +944,15 @@ impl<'a> TUI<'a> {
         self.block_list_height = Some(area.height.into());
     }
 
+    /// nb: assumes we have a highest block, will panic if that is not true
     fn block_list_selected_block(&self) -> Option<u64> {
         match self.block_list_state.selected() {
             None => None,
             Some(offset) => {
-                let highest_block_number = {
-                    let block_number_opt = self.database.highest_block.lock().unwrap();
-                    block_number_opt.unwrap()
-                };
+                let highest_block = self.database.get_highest_block().unwrap();
 
                 // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
-                Some(highest_block_number - (offset as u64))
+                Some(highest_block - (offset as u64))
             }
         }
     }
@@ -1123,16 +1115,7 @@ impl<'a> TUI<'a> {
     }
 
     fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
-        let waiting_for_initial_block = {
-            let block_number_opt = self.database.highest_block.lock().unwrap();
-
-            if let Some(_) = *block_number_opt {
-                false
-            } else {
-                true
-            }
-        };
-
+        let waiting_for_initial_block = self.database.get_highest_block().is_none();
         if waiting_for_initial_block {
             frame.render_widget(
                 Paragraph::new(Span::raw("fetching current block number")),
@@ -1391,6 +1374,24 @@ impl Database {
 
         self.fetch(NetworkRequest::BlockReceipts(new_request));
         result
+    }
+
+    // TODO: return result
+    fn set_highest_block(&self, blocknum: u64) {
+        let mut highest_block_opt = self.highest_block.lock().unwrap();
+
+        if let Some(highest_block_number) = *highest_block_opt {
+            if blocknum < highest_block_number {
+                return
+            }
+        }
+
+        *highest_block_opt = Some(blocknum);
+    }
+
+    fn get_highest_block(&self) -> Option<u64> {
+        let highest_block_opt = self.highest_block.lock().unwrap();
+        highest_block_opt.clone()
     }
 }
 
