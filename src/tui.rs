@@ -918,39 +918,27 @@ impl<'a> TUI<'a> {
     }
 
     fn txn_list_title(&mut self) -> String {
-        //TODO(2021-09-14) ick! how can you make this simpler?
-        enum State {
-            Ready,
-            FetchingTxns,
-            FetchingReceipts,
+        const READY: &str = "Transactions";
+        const FETCHING_TXNS: &str = "Transactions (fetching)";
+        const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
+
+        let block = self.block_list_selected_block();
+        if let None = block {
+            return READY.to_string();
         }
-        use State::*;
+        let block = block.unwrap();
 
-        let mut state = || {
-            let block = self.block_list_selected_block();
-            if let None = block {
-                return Ready;
-            }
-            let block = block.unwrap();
+        use RequestStatus::*;
+        let blockfetch = self.database.get_block_with_transactions(block);
+        match blockfetch {
+            Waiting() | Started() => return FETCHING_TXNS.to_string(),
+            Completed(_) => (),
+        }
 
-            use RequestStatus::*;
-            let blockfetch = self.database.get_block_with_transactions(block);
-            match blockfetch {
-                Waiting() | Started() => return FetchingTxns,
-                Completed(_) => (),
-            }
-
-            let receiptsfetch = self.database.get_block_receipts(block);
-            match receiptsfetch {
-                Waiting() | Started() => return FetchingReceipts,
-                Completed(_) => return Ready,
-            }
-        };
-
-        match state() {
-            Ready => "Transactions".to_string(),
-            FetchingTxns => "Transactions (fetching)".to_string(),
-            FetchingReceipts => "Transactions (fetching receipts)".to_string(),
+        let receiptsfetch = self.database.get_block_receipts(block);
+        match receiptsfetch {
+            Waiting() | Started() => return FETCHING_RECEIPTS.to_string(),
+            Completed(_) => return READY.to_string(),
         }
     }
 
