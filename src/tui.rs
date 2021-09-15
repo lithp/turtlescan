@@ -520,7 +520,6 @@ struct TUI<'a> {
 
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, ArcFetchTxns>,
-    highest_block: Arc<Mutex<Option<u64>>>,
 
     block_receipts: HashMap<u64, ArcFetchReceipts>,
 
@@ -573,7 +572,7 @@ fn scroll_down_one(state: &mut ListState, item_count: usize) {
 }
 
 impl<'a> TUI<'a> {
-    fn new(highest_block: Arc<Mutex<Option<u64>>>, database: &'a Database) -> TUI<'a> {
+    fn new(database: &'a Database) -> TUI<'a> {
         let txn_columns = default_txn_columns();
         let txn_column_len = txn_columns.len();
 
@@ -606,7 +605,6 @@ impl<'a> TUI<'a> {
 
             blocks: VecDeque::new(),
             blocks_to_txns: HashMap::new(),
-            highest_block: highest_block,
             block_receipts: HashMap::new(),
 
             database: database,
@@ -807,7 +805,7 @@ impl<'a> TUI<'a> {
         };
 
         {
-            let mut highest_block_number_opt = self.highest_block.lock().unwrap();
+            let mut highest_block_number_opt = self.database.highest_block.lock().unwrap();
             if let Some(highest_block_number) = *highest_block_number_opt {
                 if block_num > highest_block_number {
                     *highest_block_number_opt = Some(block_num);
@@ -901,7 +899,7 @@ impl<'a> TUI<'a> {
         // the size we will give the block list widget
         while target_height > self.blocks.len() as u16 {
             let highest_block_number = {
-                let block_number_opt = self.highest_block.lock().unwrap();
+                let block_number_opt = self.database.highest_block.lock().unwrap();
                 block_number_opt.unwrap()
             };
             let new_fetch = self.database.fetch_block(
@@ -957,7 +955,7 @@ impl<'a> TUI<'a> {
             None => None,
             Some(offset) => {
                 let highest_block_number = {
-                    let block_number_opt = self.highest_block.lock().unwrap();
+                    let block_number_opt = self.database.highest_block.lock().unwrap();
                     block_number_opt.unwrap()
                 };
 
@@ -1126,7 +1124,7 @@ impl<'a> TUI<'a> {
 
     fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let waiting_for_initial_block = {
-            let block_number_opt = self.highest_block.lock().unwrap();
+            let block_number_opt = self.database.highest_block.lock().unwrap();
 
             if let Some(_) = *block_number_opt {
                 false
@@ -1293,15 +1291,12 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let highest_block_arc = Arc::new(Mutex::new(None));
-    let highest_block_clone = highest_block_arc.clone();
-
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
     // thread exits.
-    let database = Database::start(provider, highest_block_clone, tx);
+    let database = Database::start(provider, tx);
 
-    let mut tui = TUI::new(highest_block_arc, &database);
+    let mut tui = TUI::new(&database);
 
     loop {
         terminal.draw(|mut f| {
@@ -1336,25 +1331,29 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
 struct Database {
     _bg_thread: thread::JoinHandle<()>,
     network_tx: tokio_mpsc::UnboundedSender<NetworkRequest>, // tell network what to fetch
-                                                             // network_rx: mpsc::Receiver<ArcFetch>,
+    // network_rx: mpsc::Receiver<ArcFetch>,
+    highest_block: Arc<Mutex<Option<u64>>>,
 }
 
 impl Database {
     fn start(
         provider: Provider<Ws>, // Ws is required because we watch for new blocks
-        highest_block: Arc<Mutex<Option<u64>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
     ) -> Database {
         let (network_tx, mut network_rx) = tokio_mpsc::unbounded_channel();
 
+        let highest_block = Arc::new(Mutex::new(None));
+        let highest_block_send = highest_block.clone();
+
         let handle = thread::spawn(move || {
-            run_networking(provider, highest_block, tx, &mut network_rx);
+            run_networking(provider, highest_block_send, tx, &mut network_rx);
         });
 
         Database {
             _bg_thread: handle,
             network_tx: network_tx,
             // network_rx: network_rx,
+            highest_block: highest_block,
         }
     }
 
