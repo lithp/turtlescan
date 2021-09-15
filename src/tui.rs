@@ -151,8 +151,8 @@ struct Column<T> {
 
 fn default_receipt_columns() -> Vec<Column<TransactionReceipt>> {
     vec![Column {
-        name: "gasUsed",
-        width: 5,
+        name: "gas used",
+        width: 9,
         render: Box::new(|receipt| match receipt.gas_used {
             None => "???".to_string(),
             Some(gas) => gas.to_string(),
