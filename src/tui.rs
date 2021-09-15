@@ -705,6 +705,7 @@ impl TUI {
         }
     }
 
+    //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let column_items: Vec<ListItem> = match self.focused_pane {
             FocusedPane::Blocks() => columns_to_list_items(&self.columns),
