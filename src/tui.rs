@@ -493,7 +493,7 @@ impl FocusedPane {
 
 const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
 
-struct TUI {
+struct TUI<'a> {
     /* UI state */
     block_list_state: ListState,
     block_list_height: Option<usize>,
@@ -516,7 +516,6 @@ struct TUI {
     column_items_len: usize,
 
     /* shared state */
-
     blocks: VecDeque<BlockRequest>,
 
     // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
@@ -524,6 +523,8 @@ struct TUI {
     highest_block: Arc<Mutex<Option<u64>>>,
 
     block_receipts: HashMap<u64, ArcFetchReceipts>,
+
+    database: &'a Database,
 }
 
 fn list_state_with_selection(selection: Option<usize>) -> ListState {
@@ -571,8 +572,8 @@ fn scroll_down_one(state: &mut ListState, item_count: usize) {
     */
 }
 
-impl TUI {
-    fn new() -> TUI {
+impl<'a> TUI<'a> {
+    fn new(highest_block: Arc<Mutex<Option<u64>>>, database: &'a Database) -> TUI<'a> {
         let txn_columns = default_txn_columns();
         let txn_column_len = txn_columns.len();
 
@@ -605,8 +606,10 @@ impl TUI {
 
             blocks: VecDeque::new(),
             blocks_to_txns: HashMap::new(),
-            highest_block: Arc::new(Mutex::new(None)),
+            highest_block: highest_block,
             block_receipts: HashMap::new(),
+
+            database: database,
         }
     }
 
@@ -762,7 +765,7 @@ impl TUI {
         };
     }
 
-    fn handle_new_block(&mut self, block: EthBlock<TxHash>, block_fetcher: &Networking) {
+    fn handle_new_block(&mut self, block: EthBlock<TxHash>) {
         debug!("UI received new block {}", block.number.unwrap());
 
         // we cannot add this block directly because it is missing a bunch of
@@ -778,7 +781,7 @@ impl TUI {
         //                  reorg
         let block_num = block.number.unwrap().low_u64();
 
-        let new_fetch = block_fetcher.fetch_block(block_num);
+        let new_fetch = self.database.fetch_block(block_num);
         self.blocks.push_front(new_fetch);
 
         // TODO(2021-09-11): I think a lot of this logic will become easier if the
@@ -884,12 +887,7 @@ impl TUI {
         frame.render_widget(widget, area);
     }
 
-    fn draw_block_list<B: Backend>(
-        &mut self,
-        frame: &mut Frame<B>,
-        area: Rect,
-        block_fetcher: &Networking,
-    ) {
+    fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
         let target_height = area.height;
         let target_height = {
             // the border consumes 2 lines
@@ -906,7 +904,7 @@ impl TUI {
                 let block_number_opt = self.highest_block.lock().unwrap();
                 block_number_opt.unwrap()
             };
-            let new_fetch = block_fetcher.fetch_block(
+            let new_fetch = self.database.fetch_block(
                 // TODO: if the chain is very young this could underflow
                 highest_block_number - self.blocks.len() as u64,
             );
@@ -1026,18 +1024,13 @@ impl TUI {
         }
     }
 
-    fn draw_txn_list<B: Backend>(
-        &mut self,
-        frame: &mut Frame<B>,
-        area: Rect,
-        block_fetcher: &Networking,
-    ) {
+    fn draw_txn_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
         let block_selection = self.block_list_selected_block();
 
         let txn_items = if let Some(block_at_offset) = block_selection {
             let block_arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
                 None => {
-                    let new_fetch = block_fetcher.fetch_block_with_txns(block_at_offset);
+                    let new_fetch = self.database.fetch_block_with_txns(block_at_offset);
                     debug!("fired new request for block {}", block_at_offset);
                     self.blocks_to_txns.insert(block_at_offset, new_fetch.1);
 
@@ -1048,7 +1041,7 @@ impl TUI {
 
             let receipts_arcfetch = match self.block_receipts.get(&block_at_offset) {
                 None => {
-                    let new_fetch = block_fetcher.fetch_block_receipts(block_at_offset);
+                    let new_fetch = self.database.fetch_block_receipts(block_at_offset);
                     debug!("fired new request for block {}", block_at_offset);
                     self.block_receipts.insert(block_at_offset, new_fetch.1);
 
@@ -1131,7 +1124,7 @@ impl TUI {
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
     }
 
-    fn draw<B: Backend>(&mut self, frame: &mut Frame<B>, block_fetcher: &Networking) {
+    fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let waiting_for_initial_block = {
             let block_number_opt = self.highest_block.lock().unwrap();
 
@@ -1160,7 +1153,7 @@ impl TUI {
 
         match self.pane_state {
             PaneState::JustBlocks => {
-                self.draw_block_list(frame, pane_chunk, block_fetcher);
+                self.draw_block_list(frame, pane_chunk);
             }
 
             PaneState::BlocksTransactions(_) => {
@@ -1174,8 +1167,8 @@ impl TUI {
                     ])
                     .split(pane_chunk);
 
-                self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
-                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+                self.draw_block_list(frame, horiz_chunks[0]);
+                self.draw_txn_list(frame, horiz_chunks[1]);
             }
 
             PaneState::BlocksTransactionsTransaction(_) => {
@@ -1196,8 +1189,8 @@ impl TUI {
                     ])
                     .split(horiz_chunks[0]);
 
-                self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
-                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+                self.draw_block_list(frame, horiz_chunks[0]);
+                self.draw_txn_list(frame, horiz_chunks[1]);
                 self.draw_transaction_details(frame, txn_pane_chunk);
             }
         }
@@ -1300,17 +1293,19 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let mut tui = TUI::new();
+    let highest_block_arc = Arc::new(Mutex::new(None));
+    let highest_block_clone = highest_block_arc.clone();
 
     // let's do some networking in the background
     // no real need to hold onto this handle, the thread will be killed when this main
     // thread exits.
-    let highest_block_clone = tui.highest_block.clone();
-    let block_fetcher = Networking::start(provider, highest_block_clone, tx);
+    let database = Database::start(provider, highest_block_clone, tx);
+
+    let mut tui = TUI::new(highest_block_arc, &database);
 
     loop {
         terminal.draw(|mut f| {
-            tui.draw(&mut f, &block_fetcher);
+            tui.draw(&mut f);
         })?;
 
         let input = rx.recv().unwrap()?; // blocks until we have more input
@@ -1331,32 +1326,32 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 }
             },
             UIMessage::Refresh() => {}
-            UIMessage::NewBlock(block) => tui.handle_new_block(block, &block_fetcher),
+            UIMessage::NewBlock(block) => tui.handle_new_block(block),
         }
     }
 
     Ok(())
 }
 
-struct Networking {
+struct Database {
     _bg_thread: thread::JoinHandle<()>,
     network_tx: tokio_mpsc::UnboundedSender<NetworkRequest>, // tell network what to fetch
                                                              // network_rx: mpsc::Receiver<ArcFetch>,
 }
 
-impl Networking {
+impl Database {
     fn start(
         provider: Provider<Ws>, // Ws is required because we watch for new blocks
         highest_block: Arc<Mutex<Option<u64>>>,
         tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-    ) -> Networking {
+    ) -> Database {
         let (network_tx, mut network_rx) = tokio_mpsc::unbounded_channel();
 
         let handle = thread::spawn(move || {
             run_networking(provider, highest_block, tx, &mut network_rx);
         });
 
-        Networking {
+        Database {
             _bg_thread: handle,
             network_tx: network_tx,
             // network_rx: network_rx,
