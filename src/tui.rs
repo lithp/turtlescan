@@ -917,28 +917,28 @@ impl<'a> TUI<'a> {
         }
     }
 
-    fn txn_list_title(&mut self) -> String {
+    fn txn_list_title(&mut self) -> &'static str {
         const READY: &str = "Transactions";
         const FETCHING_TXNS: &str = "Transactions (fetching)";
         const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
 
         let block = self.block_list_selected_block();
         if let None = block {
-            return READY.to_string();
+            return READY;
         }
         let block = block.unwrap();
 
         use RequestStatus::*;
         let blockfetch = self.database.get_block_with_transactions(block);
         match blockfetch {
-            Waiting() | Started() => return FETCHING_TXNS.to_string(),
+            Waiting() | Started() => return FETCHING_TXNS,
             Completed(_) => (),
         }
 
         let receiptsfetch = self.database.get_block_receipts(block);
         match receiptsfetch {
-            Waiting() | Started() => return FETCHING_RECEIPTS.to_string(),
-            Completed(_) => return READY.to_string(),
+            Waiting() | Started() => return FETCHING_RECEIPTS,
+            Completed(_) => return READY,
         }
     }
 
