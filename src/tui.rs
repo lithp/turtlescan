@@ -497,15 +497,7 @@ struct TUI<'a> {
     columns: Vec<Column<EthBlock<TxHash>>>,
     column_items_len: usize,
 
-    /* shared state */
-    blocks: VecDeque<BlockRequest>,
-
-    // TODO(2021-09-10) currently this leaks memory, use an lru cache or something
-    blocks_to_txns: HashMap<u64, ArcFetchTxns>,
-
-    block_receipts: HashMap<u64, ArcFetchReceipts>,
-
-    database: &'a Database,
+    database: &'a mut Database,
 }
 
 fn list_state_with_selection(selection: Option<usize>) -> ListState {
@@ -554,7 +546,7 @@ fn scroll_down_one(state: &mut ListState, item_count: usize) {
 }
 
 impl<'a> TUI<'a> {
-    fn new(database: &'a Database) -> TUI<'a> {
+    fn new(database: &'a mut Database) -> TUI<'a> {
         let txn_columns = default_txn_columns();
         let txn_column_len = txn_columns.len();
 
@@ -584,10 +576,6 @@ impl<'a> TUI<'a> {
 
             receipt_columns: receipt_columns,
             _receipt_column_len: receipt_column_len,
-
-            blocks: VecDeque::new(),
-            blocks_to_txns: HashMap::new(),
-            block_receipts: HashMap::new(),
 
             database: database,
         }
@@ -762,7 +750,7 @@ impl<'a> TUI<'a> {
         let block_num = block.number.unwrap().low_u64();
 
         let new_fetch = self.database.fetch_block(block_num);
-        self.blocks.push_front(new_fetch);
+        self.database.blocks.push_front(new_fetch);
 
         // TODO(2021-09-11): I think a lot of this logic will become easier if the
         //                   selection were stored as a highlighted block number
@@ -817,7 +805,7 @@ impl<'a> TUI<'a> {
         }
         let selected_block: u64 = selected_block.unwrap();
 
-        let blockarc = self.blocks_to_txns.get(&selected_block);
+        let blockarc = self.database.blocks_to_txns.get(&selected_block);
         if let None = blockarc {
             // TODO: this might warrant a warn!(), I don't think it's possible
             return None;
@@ -872,23 +860,23 @@ impl<'a> TUI<'a> {
         };
 
         // the size we will give the block list widget
-        while target_height > self.blocks.len() as u16 {
-
+        while target_height > self.database.blocks.len() as u16 {
             // unwrapping is safe because the tui does not render until the network first
             // fetches the higest block, and the highest block is never set back to None
             let highest_block_number = self.database.get_highest_block().unwrap();
 
             let new_fetch = self.database.fetch_block(
                 // TODO: if the chain is very young this could underflow
-                highest_block_number - self.blocks.len() as u64,
+                highest_block_number - self.database.blocks.len() as u64,
             );
-            self.blocks.push_back(new_fetch);
+            self.database.blocks.push_back(new_fetch);
         }
 
         let header = columns_to_header(&self.columns);
 
         let block_lines = {
             let block_lines: Vec<ListItem> = self
+                .database
                 .blocks
                 .iter()
                 .map(|block_request| {
@@ -912,14 +900,10 @@ impl<'a> TUI<'a> {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(
-                        Style::default().fg(border_color(is_focused))
-                    )
+                    .border_style(Style::default().fg(border_color(is_focused)))
                     .title("Blocks"),
             )
-            .highlight_style(
-                Style::default().bg(selection_color(is_focused)),
-            )
+            .highlight_style(Style::default().bg(selection_color(is_focused)))
             .header(header);
         frame.render_stateful_widget(block_list, area, &mut self.block_list_state);
 
@@ -957,7 +941,7 @@ impl<'a> TUI<'a> {
             }
             let block = block.unwrap();
 
-            let blockarc = self.blocks_to_txns.get(&block);
+            let blockarc = self.database.blocks_to_txns.get(&block);
             if let None = blockarc {
                 return Ready;
             }
@@ -973,7 +957,7 @@ impl<'a> TUI<'a> {
                 }
             }
 
-            let receiptsarc = self.block_receipts.get(&block);
+            let receiptsarc = self.database.block_receipts.get(&block);
             if let None = receiptsarc {
                 return FetchingReceipts;
             }
@@ -1001,24 +985,28 @@ impl<'a> TUI<'a> {
         let block_selection = self.block_list_selected_block();
 
         let txn_items = if let Some(block_at_offset) = block_selection {
-            let block_arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
+            let block_arcfetch = match self.database.blocks_to_txns.get(&block_at_offset) {
                 None => {
                     let new_fetch = self.database.fetch_block_with_txns(block_at_offset);
                     debug!("fired new request for block {}", block_at_offset);
-                    self.blocks_to_txns.insert(block_at_offset, new_fetch.1);
+                    self.database
+                        .blocks_to_txns
+                        .insert(block_at_offset, new_fetch.1);
 
-                    self.blocks_to_txns.get(&block_at_offset).unwrap()
+                    self.database.blocks_to_txns.get(&block_at_offset).unwrap()
                 }
                 Some(arcfetch) => arcfetch,
             };
 
-            let receipts_arcfetch = match self.block_receipts.get(&block_at_offset) {
+            let receipts_arcfetch = match self.database.block_receipts.get(&block_at_offset) {
                 None => {
                     let new_fetch = self.database.fetch_block_receipts(block_at_offset);
                     debug!("fired new request for block {}", block_at_offset);
-                    self.block_receipts.insert(block_at_offset, new_fetch.1);
+                    self.database
+                        .block_receipts
+                        .insert(block_at_offset, new_fetch.1);
 
-                    self.block_receipts.get(&block_at_offset).unwrap()
+                    self.database.block_receipts.get(&block_at_offset).unwrap()
                 }
                 Some(arcfetch) => arcfetch,
             };
@@ -1086,14 +1074,10 @@ impl<'a> TUI<'a> {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(
-                        Style::default().fg(border_color(is_focused)),
-                    )
+                    .border_style(Style::default().fg(border_color(is_focused)))
                     .title(title),
             )
-            .highlight_style(
-                Style::default().bg(selection_color(is_focused)),
-            )
+            .highlight_style(Style::default().bg(selection_color(is_focused)))
             .header(header);
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
     }
@@ -1258,12 +1242,8 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // let's do some networking in the background
-    // no real need to hold onto this handle, the thread will be killed when this main
-    // thread exits.
-    let database = Database::start(provider, tx);
-
-    let mut tui = TUI::new(&database);
+    let mut database = Database::start(provider, tx);
+    let mut tui = TUI::new(&mut database);
 
     loop {
         terminal.draw(|mut f| {
@@ -1299,6 +1279,11 @@ struct Database {
     _bg_thread: thread::JoinHandle<()>,
     network_tx: tokio_mpsc::UnboundedSender<NetworkRequest>, // tell network what to fetch
     // network_rx: mpsc::Receiver<ArcFetch>,
+
+    // TODO(2021-09-10) currently these leak memory, use an lru cache or something
+    blocks_to_txns: HashMap<u64, ArcFetchTxns>,
+    blocks: VecDeque<BlockRequest>,
+    block_receipts: HashMap<u64, ArcFetchReceipts>,
     highest_block: Arc<Mutex<Option<u64>>>,
 }
 
@@ -1312,6 +1297,8 @@ impl Database {
         let highest_block = Arc::new(Mutex::new(None));
         let highest_block_send = highest_block.clone();
 
+        // no real need to hold onto this handle, the thread will be killed when this main
+        // thread exits.
         let handle = thread::spawn(move || {
             run_networking(provider, highest_block_send, tx, &mut network_rx);
         });
@@ -1321,6 +1308,9 @@ impl Database {
             network_tx: network_tx,
             // network_rx: network_rx,
             highest_block: highest_block,
+            blocks: VecDeque::new(),
+            blocks_to_txns: HashMap::new(),
+            block_receipts: HashMap::new(),
         }
     }
 
@@ -1366,7 +1356,7 @@ impl Database {
 
         if let Some(highest_block_number) = *highest_block_opt {
             if blocknum < highest_block_number {
-                return
+                return;
             }
         }
 
