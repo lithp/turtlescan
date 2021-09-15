@@ -29,7 +29,7 @@ use simple_error::SimpleError;
 
 use std::collections::{HashMap, VecDeque};
 
-use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
+use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, H256};
 
 use std::sync::mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -818,14 +818,53 @@ impl TUI {
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
     }
 
-    fn draw_transaction_details<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let is_focused = self.pane_state.focused_pane() == FocusedPane::Transaction;
+    fn txn_list_selected_txn(&self) -> Option<H256> {
+        let selected_block: Option<u64> = self.block_list_selected_block();
 
+        if let None = selected_block {
+            return None;
+        }
+        let selected_block: u64 = selected_block.unwrap();
+
+        let blockarc = self.blocks_to_txns.get(&selected_block);
+        if let None = blockarc {
+            // TODO: this might warrant a warn!(), I don't think it's possible
+            return None;
+        }
+        let blockarc = blockarc.unwrap();
+
+        use RequestStatus::*;
+
+        match self.txn_list_state.selected() {
+            None => None,
+            Some(offset) => {
+                let fetch = blockarc.lock().unwrap();
+                match &*fetch {
+                    Waiting() | Started() => return None,
+                    Completed(block) => {
+                        if offset >= block.transactions.len() {
+                            panic!("inconsistent state");
+                        }
+
+                        return Some(block.transactions[offset].hash);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_transaction_details<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+        let title = self
+            .txn_list_selected_txn()
+            .map(|hash| util::format_block_hash(hash.as_bytes()))
+            .unwrap_or("Transaction".to_string());
+
+        let is_focused = self.pane_state.focused_pane() == FocusedPane::Transaction;
         let widget = Paragraph::new(Span::raw("")).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color(is_focused)))
-                .title("Transaction"),
+                .title(title),
         );
         frame.render_widget(widget, area);
     }
