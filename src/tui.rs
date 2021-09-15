@@ -388,6 +388,7 @@ fn selection_color(focused: bool) -> Color {
     }
 }
 
+#[derive(Debug, Clone)]
 enum PaneState {
     JustBlocks,
 
@@ -436,6 +437,17 @@ impl PaneState {
             BlocksTransactionsTransaction(1) => Transactions,
             BlocksTransactionsTransaction(2) => Transaction,
             BlocksTransactionsTransaction(_) => unreachable!(),
+        }
+    }
+
+    fn close_all_to_right(&self) -> PaneState {
+        use FocusedPane::*;
+        use PaneState::*;
+
+        match self.focused_pane() {
+            Blocks => JustBlocks,
+            Transactions => BlocksTransactions(1),
+            Transaction => BlocksTransactionsTransaction(2),
         }
     }
 }
@@ -599,14 +611,52 @@ impl TUI {
         };
     }
 
-    fn toggle_showing_transactions(&mut self) {
+    fn handle_key_right(&mut self) {
+        // we're going to move the focus, if a pane exists, and create it if it does not
         use PaneState::*;
 
-        self.pane_state = match self.pane_state {
-            JustBlocks => BlocksTransactions(1),
-            BlocksTransactions(_) => JustBlocks,
-            BlocksTransactionsTransaction(_) => JustBlocks,
-        };
+        match self.pane_state {
+            JustBlocks => {
+                match self.block_list_state.selected() {
+                    None => {} // can't inspect a block, there is no block to inspect
+                    Some(_) => {
+                        // no need to worry about which block is selected, the UI will
+                        // read it again when we draw on the next loop
+                        self.pane_state = BlocksTransactions(1);
+                    }
+                }
+            }
+
+            BlocksTransactions(0) => self.pane_state = BlocksTransactions(1),
+            BlocksTransactions(1) => match self.txn_list_state.selected() {
+                None => {}
+                Some(_) => {
+                    self.pane_state = BlocksTransactionsTransaction(2);
+                }
+            },
+            BlocksTransactions(_) => unreachable!(),
+
+            BlocksTransactionsTransaction(0) => {
+                self.pane_state = BlocksTransactionsTransaction(1);
+            }
+            BlocksTransactionsTransaction(1) => {
+                self.pane_state = BlocksTransactionsTransaction(2);
+            }
+
+            // we're already all the way to the right, nothing more to do
+            BlocksTransactionsTransaction(2) => {}
+            BlocksTransactionsTransaction(_) => unreachable!(),
+        }
+    }
+
+    fn handle_key_left(&mut self) {
+        if self.pane_state.focused_pane() == FocusedPane::Blocks {
+            self.pane_state = PaneState::JustBlocks;
+            return;
+        }
+
+        self.pane_state = self.pane_state.prev();
+        self.pane_state = self.pane_state.close_all_to_right();
     }
 
     fn handle_key_up(&mut self) {
@@ -628,7 +678,7 @@ impl TUI {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_up_one(&mut self.txn_list_state, item_count);
                 }
-                FocusedPane::Transaction => unreachable!(),
+                FocusedPane::Transaction => {}
             },
             true => {
                 let item_count = self.column_count();
@@ -662,7 +712,7 @@ impl TUI {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_down_one(&mut self.txn_list_state, item_count);
                 }
-                FocusedPane::Transaction => unreachable!(),
+                FocusedPane::Transaction => {}
             },
         };
     }
@@ -766,6 +816,18 @@ impl TUI {
 
         frame.render_widget(Clear, area);
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
+    }
+
+    fn draw_transaction_details<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+        let is_focused = self.pane_state.focused_pane() == FocusedPane::Transaction;
+
+        let widget = Paragraph::new(Span::raw("")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color(is_focused)))
+                .title("Transaction"),
+        );
+        frame.render_widget(widget, area);
     }
 
     fn draw_block_list<B: Backend>(
@@ -1040,27 +1102,37 @@ impl TUI {
             .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref())
             .split(frame.size());
 
-        let horiz_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(vert_chunks[0]);
+        let pane_chunk = vert_chunks[0];
 
-        let showing_transactions = match self.pane_state {
-            PaneState::JustBlocks => false,
-            PaneState::BlocksTransactions(_) => true,
-            PaneState::BlocksTransactionsTransaction(_) => true,
-        };
+        match self.pane_state {
+            PaneState::JustBlocks => {
+                self.draw_block_list(frame, pane_chunk, block_fetcher);
+            }
 
-        let block_list_chunk = if showing_transactions {
-            horiz_chunks[0]
-        } else {
-            vert_chunks[0]
-        };
+            PaneState::BlocksTransactions(_) => {
+                let horiz_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(pane_chunk);
 
-        self.draw_block_list(frame, block_list_chunk, block_fetcher);
+                self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
+                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+            }
 
-        if showing_transactions {
-            self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+            PaneState::BlocksTransactionsTransaction(_) => {
+                let horiz_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(33),
+                        Constraint::Percentage(33),
+                        Constraint::Percentage(33),
+                    ])
+                    .split(pane_chunk);
+
+                self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
+                self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
+                self.draw_transaction_details(frame, horiz_chunks[2]);
+            }
         }
 
         let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
@@ -1068,7 +1140,7 @@ impl TUI {
         // TODO: if both panes are active show (Tab) focus {the other pane}
 
         let status_string = match self.configuring_columns {
-            false => "  (q) quit - (c) configure columns - (t) toggle transactions view",
+            false => "  (q) quit - (c) configure columns",
             true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
         };
 
@@ -1133,9 +1205,10 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
             UIMessage::Key(key) => match key {
                 Key::Char('q') | Key::Esc | Key::Ctrl('c') => break,
                 Key::Char('c') => tui.toggle_configuring_columns(),
-                Key::Char('t') => tui.toggle_showing_transactions(),
                 Key::Up => tui.handle_key_up(),
                 Key::Down => tui.handle_key_down(),
+                Key::Right => tui.handle_key_right(),
+                Key::Left => tui.handle_key_left(),
                 Key::Char(' ') => tui.handle_key_space(),
                 Key::Char('\t') => tui.handle_tab(true),
                 Key::BackTab => tui.handle_tab(false),
