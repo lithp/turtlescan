@@ -1110,9 +1110,14 @@ impl TUI {
             }
 
             PaneState::BlocksTransactions(_) => {
+                let (blocks_width, txns_width) = self.allocate_width_two_panes(pane_chunk.width);
+
                 let horiz_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .constraints([
+                        Constraint::Length(blocks_width),
+                        Constraint::Length(txns_width),
+                    ])
                     .split(pane_chunk);
 
                 self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
@@ -1122,16 +1127,24 @@ impl TUI {
             PaneState::BlocksTransactionsTransaction(_) => {
                 let horiz_chunks = Layout::default()
                     .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(0), Constraint::Length(40)])
+                    .split(pane_chunk);
+
+                let (blocks_width, txns_width) =
+                    self.allocate_width_two_panes(horiz_chunks[0].width);
+                let txn_pane_chunk = horiz_chunks[1];
+
+                let horiz_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
                     .constraints([
-                        Constraint::Percentage(33),
-                        Constraint::Percentage(33),
-                        Constraint::Percentage(33),
+                        Constraint::Length(blocks_width),
+                        Constraint::Length(txns_width),
                     ])
                     .split(pane_chunk);
 
                 self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
                 self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
-                self.draw_transaction_details(frame, horiz_chunks[2]);
+                self.draw_transaction_details(frame, txn_pane_chunk);
             }
         }
 
@@ -1150,6 +1163,53 @@ impl TUI {
         if self.configuring_columns {
             self.draw_popup(frame);
         }
+    }
+
+    fn allocate_width_two_panes(&self, available_width: u16) -> (u16, u16) {
+        const HEADERS: u16 = 2;
+        let blocks_desired_width = HEADERS + columns_to_desired_width(&self.columns) as u16;
+        let txns_desired_width = HEADERS + {
+            let txn_width = columns_to_desired_width(&self.txn_columns) as u16;
+            let receipt_width = columns_to_desired_width(&self.receipt_columns) as u16;
+
+            // we only need a spacer if both sources have enabled columns
+            if cmp::min(txn_width, receipt_width) == 0 {
+                txn_width + receipt_width
+            } else {
+                txn_width + receipt_width + 1
+            }
+        };
+
+        // just enough room for the header to remain visible
+        let blocks_min_width = 8;
+        let transactions_min_width = 15;
+
+        if available_width > blocks_desired_width + txns_desired_width {
+            return (blocks_desired_width, txns_desired_width);
+        }
+
+        // there is not enough room for everybody to fit
+        // the focused pane should get priority
+
+        if self.pane_state.focused_pane() == FocusedPane::Blocks {
+            if available_width < blocks_min_width + transactions_min_width {
+                return (available_width, 0);
+            }
+
+            let remaining_width = available_width.saturating_sub(blocks_desired_width);
+            let txn_width = cmp::max(remaining_width, transactions_min_width);
+            let block_width = available_width.saturating_sub(txn_width);
+            return (block_width, txn_width);
+        }
+
+        if available_width < blocks_min_width + transactions_min_width {
+            return (0, available_width);
+        }
+
+        let remaining_width = available_width.saturating_sub(txns_desired_width);
+        let block_width = cmp::max(remaining_width, blocks_min_width);
+        let txn_width = available_width.saturating_sub(block_width);
+        return (block_width, txn_width);
     }
 }
 
@@ -1435,6 +1495,16 @@ impl<'a> HeaderList<'a> {
         self.header = Some(header);
         self
     }
+}
+
+fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
+    let spaces = columns.len().saturating_sub(1);
+    let width = columns
+        .iter()
+        .filter(|col| col.enabled)
+        .fold(0, |accum, column| accum + column.width);
+
+    width + spaces
 }
 
 fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans {
