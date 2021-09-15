@@ -368,58 +368,100 @@ fn block_to_txn_list_items(
         .collect()
 }
 
-#[derive(Copy, Clone)]
+const FOCUSED_BORDER: Color = Color::Gray;
+const UNFOCUSED_BORDER: Color = Color::DarkGray;
+
+const FOCUSED_SELECTION: Color = Color::LightGreen;
+const UNFOCUSED_SELECTION: Color = Color::Green;
+
+fn border_color(focused: bool) -> Color {
+    match focused {
+        true => FOCUSED_BORDER,
+        false => UNFOCUSED_BORDER,
+    }
+}
+
+fn selection_color(focused: bool) -> Color {
+    match focused {
+        true => FOCUSED_SELECTION,
+        false => UNFOCUSED_SELECTION,
+    }
+}
+
+enum PaneState {
+    JustBlocks,
+
+    /// usize is the index of the focused_pane: 0 or 1
+    BlocksTransactions(usize),
+
+    /// usize is the index of the focused pane: 0, 1, or 2
+    BlocksTransactionsTransaction(usize),
+}
+
+impl PaneState {
+    fn next(&self) -> Self {
+        use PaneState::*;
+
+        match self {
+            JustBlocks => JustBlocks,
+            BlocksTransactions(focused) => BlocksTransactions((focused + 1).rem_euclid(2)),
+            BlocksTransactionsTransaction(focused) => {
+                BlocksTransactionsTransaction((focused + 1).rem_euclid(3))
+            }
+        }
+    }
+
+    fn prev(&self) -> Self {
+        use PaneState::*;
+
+        match self {
+            JustBlocks => JustBlocks,
+            BlocksTransactions(focused) => BlocksTransactions((focused + 1).rem_euclid(2)),
+            BlocksTransactionsTransaction(focused) => BlocksTransactionsTransaction(
+                // 2 is the inverse of 1 so adding it is equiv to subtracting 1
+                (focused + 2).rem_euclid(3),
+            ),
+        }
+    }
+
+    fn focused_pane(&self) -> FocusedPane {
+        use FocusedPane::*;
+        use PaneState::*;
+        match self {
+            JustBlocks => Blocks,
+            BlocksTransactions(0) => Blocks,
+            BlocksTransactions(1) => Transactions,
+            BlocksTransactions(_) => unreachable!(),
+            BlocksTransactionsTransaction(0) => Blocks,
+            BlocksTransactionsTransaction(1) => Transactions,
+            BlocksTransactionsTransaction(2) => Transaction,
+            BlocksTransactionsTransaction(_) => unreachable!(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
 enum FocusedPane {
     Blocks,
     Transactions,
+    Transaction,
 }
 
 impl FocusedPane {
-    fn toggle(self) -> FocusedPane {
-        use FocusedPane::*;
-        match self {
-            Blocks => Transactions,
-            Transactions => Blocks,
-        }
-    }
-
-    const FOCUSED_BORDER: Color = Color::Gray;
-    const UNFOCUSED_BORDER: Color = Color::DarkGray;
-
     fn blocks_border_color(&self) -> Color {
-        use FocusedPane::*;
-        match self {
-            Blocks => FocusedPane::FOCUSED_BORDER,
-            Transactions => FocusedPane::UNFOCUSED_BORDER,
-        }
+        border_color(self == &FocusedPane::Blocks)
     }
 
     fn txns_border_color(&self) -> Color {
-        use FocusedPane::*;
-        match self {
-            Blocks => FocusedPane::UNFOCUSED_BORDER,
-            Transactions => FocusedPane::FOCUSED_BORDER,
-        }
+        border_color(self == &FocusedPane::Transactions)
     }
 
-    const FOCUSED_SELECTION: Color = Color::LightGreen;
-    const UNFOCUSED_SELECTION: Color = Color::Green;
-
     fn blocks_selection_color(&self) -> Color {
-        use FocusedPane::*;
-        match self {
-            Blocks => FocusedPane::FOCUSED_SELECTION,
-            Transactions => FocusedPane::UNFOCUSED_SELECTION,
-        }
+        selection_color(self == &FocusedPane::Blocks)
     }
 
     fn txns_selection_color(&self) -> Color {
-        // TODO: I'm missing an abstraction which removes this tedium
-        use FocusedPane::*;
-        match self {
-            Blocks => FocusedPane::UNFOCUSED_SELECTION,
-            Transactions => FocusedPane::FOCUSED_SELECTION,
-        }
+        selection_color(self == &FocusedPane::Transactions)
     }
 }
 
@@ -436,8 +478,7 @@ struct TUI {
     txn_list_length: Option<usize>,
 
     configuring_columns: bool,
-    showing_transactions: bool,
-    focused_pane: FocusedPane,
+    pane_state: PaneState,
 
     txn_columns: Vec<Column<Transaction>>,
     txn_column_len: usize,
@@ -524,8 +565,7 @@ impl TUI {
             txn_list_length: None,
 
             configuring_columns: false,
-            showing_transactions: false,
-            focused_pane: FocusedPane::Blocks,
+            pane_state: PaneState::JustBlocks,
 
             txn_columns: txn_columns,
             txn_column_len: txn_column_len,
@@ -544,9 +584,10 @@ impl TUI {
     }
 
     fn column_count(&self) -> usize {
-        match self.focused_pane {
+        match self.pane_state.focused_pane() {
             FocusedPane::Blocks => self.column_items_len,
             FocusedPane::Transactions => self.txn_column_len,
+            FocusedPane::Transaction => 0, // nothing to configure
         }
     }
 
@@ -559,21 +600,18 @@ impl TUI {
     }
 
     fn toggle_showing_transactions(&mut self) {
-        match self.showing_transactions {
-            true => {
-                self.showing_transactions = false;
-                self.focused_pane = FocusedPane::Blocks;
-            }
-            false => {
-                self.showing_transactions = true;
-                self.focused_pane = FocusedPane::Transactions;
-            }
+        use PaneState::*;
+
+        self.pane_state = match self.pane_state {
+            JustBlocks => BlocksTransactions(1),
+            BlocksTransactions(_) => JustBlocks,
+            BlocksTransactionsTransaction(_) => JustBlocks,
         };
     }
 
     fn handle_key_up(&mut self) {
         match self.configuring_columns {
-            false => match self.focused_pane {
+            false => match self.pane_state.focused_pane() {
                 FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
@@ -590,6 +628,7 @@ impl TUI {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_up_one(&mut self.txn_list_state, item_count);
                 }
+                FocusedPane::Transaction => unreachable!(),
             },
             true => {
                 let item_count = self.column_count();
@@ -604,7 +643,7 @@ impl TUI {
                 let col_count = self.column_count();
                 scroll_down_one(&mut self.column_list_state, col_count);
             }
-            false => match self.focused_pane {
+            false => match self.pane_state.focused_pane() {
                 FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
@@ -623,6 +662,7 @@ impl TUI {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_down_one(&mut self.txn_list_state, item_count);
                 }
+                FocusedPane::Transaction => unreachable!(),
             },
         };
     }
@@ -634,12 +674,15 @@ impl TUI {
                 if let Some(i) = self.column_list_state.selected() {
                     // TODO(2021-09-11) this entire codebase is ugly but this is
                     //                  especially gnarly
-                    match self.focused_pane {
+                    match self.pane_state.focused_pane() {
                         FocusedPane::Blocks => {
                             self.columns[i].enabled = !self.columns[i].enabled;
                         }
                         FocusedPane::Transactions => {
                             self.txn_columns[i].enabled = !self.txn_columns[i].enabled;
+                        }
+                        FocusedPane::Transaction => {
+                            // this pane has no columns to configure
                         }
                     };
                 }
@@ -647,11 +690,11 @@ impl TUI {
         };
     }
 
-    fn handle_tab(&mut self, _forward: bool) {
-        if self.showing_transactions {
-            // TODO: this turns into a copy? why?
-            self.focused_pane = self.focused_pane.toggle();
-        }
+    fn handle_tab(&mut self, forward: bool) {
+        self.pane_state = match forward {
+            true => self.pane_state.next(),
+            false => self.pane_state.prev(),
+        };
     }
 
     fn handle_new_block(&mut self, block: EthBlock<TxHash>, block_fetcher: &Networking) {
@@ -707,9 +750,10 @@ impl TUI {
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
-        let column_items: Vec<ListItem> = match self.focused_pane {
+        let column_items: Vec<ListItem> = match self.pane_state.focused_pane() {
             FocusedPane::Blocks => columns_to_list_items(&self.columns),
             FocusedPane::Transactions => columns_to_list_items(&self.txn_columns),
+            FocusedPane::Transaction => vec![ListItem::new(Span::raw("nothing to configure"))],
         };
 
         let popup = List::new(column_items.clone())
@@ -779,10 +823,14 @@ impl TUI {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.focused_pane.blocks_border_color()))
+                    .border_style(
+                        Style::default().fg(self.pane_state.focused_pane().blocks_border_color()),
+                    )
                     .title("Blocks"),
             )
-            .highlight_style(Style::default().bg(self.focused_pane.blocks_selection_color()))
+            .highlight_style(
+                Style::default().bg(self.pane_state.focused_pane().blocks_selection_color()),
+            )
             .header(header);
         frame.render_stateful_widget(block_list, area, &mut self.block_list_state);
 
@@ -955,10 +1003,14 @@ impl TUI {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.focused_pane.txns_border_color()))
+                    .border_style(
+                        Style::default().fg(self.pane_state.focused_pane().txns_border_color()),
+                    )
                     .title(title),
             )
-            .highlight_style(Style::default().bg(self.focused_pane.txns_selection_color()))
+            .highlight_style(
+                Style::default().bg(self.pane_state.focused_pane().txns_selection_color()),
+            )
             .header(header);
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
     }
@@ -993,7 +1045,13 @@ impl TUI {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(vert_chunks[0]);
 
-        let block_list_chunk = if self.showing_transactions {
+        let showing_transactions = match self.pane_state {
+            PaneState::JustBlocks => false,
+            PaneState::BlocksTransactions(_) => true,
+            PaneState::BlocksTransactionsTransaction(_) => true,
+        };
+
+        let block_list_chunk = if showing_transactions {
             horiz_chunks[0]
         } else {
             vert_chunks[0]
@@ -1001,7 +1059,7 @@ impl TUI {
 
         self.draw_block_list(frame, block_list_chunk, block_fetcher);
 
-        if self.showing_transactions {
+        if showing_transactions {
             self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
         }
 
