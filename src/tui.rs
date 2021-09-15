@@ -439,7 +439,7 @@ impl PaneState {
         }
     }
 
-    fn focused_pane(&self) -> FocusedPane {
+    fn focus(&self) -> FocusedPane {
         use FocusedPane::*;
         use PaneState::*;
         match self {
@@ -458,7 +458,7 @@ impl PaneState {
         use FocusedPane::*;
         use PaneState::*;
 
-        match self.focused_pane() {
+        match self.focus() {
             Blocks => JustBlocks,
             Transactions => BlocksTransactions(1),
             Transaction => BlocksTransactionsTransaction(2),
@@ -471,24 +471,6 @@ enum FocusedPane {
     Blocks,
     Transactions,
     Transaction,
-}
-
-impl FocusedPane {
-    fn blocks_border_color(&self) -> Color {
-        border_color(self == &FocusedPane::Blocks)
-    }
-
-    fn txns_border_color(&self) -> Color {
-        border_color(self == &FocusedPane::Transactions)
-    }
-
-    fn blocks_selection_color(&self) -> Color {
-        selection_color(self == &FocusedPane::Blocks)
-    }
-
-    fn txns_selection_color(&self) -> Color {
-        selection_color(self == &FocusedPane::Transactions)
-    }
 }
 
 const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
@@ -612,7 +594,7 @@ impl<'a> TUI<'a> {
     }
 
     fn column_count(&self) -> usize {
-        match self.pane_state.focused_pane() {
+        match self.pane_state.focus() {
             FocusedPane::Blocks => self.column_items_len,
             FocusedPane::Transactions => self.txn_column_len,
             FocusedPane::Transaction => 0, // nothing to configure
@@ -666,7 +648,7 @@ impl<'a> TUI<'a> {
     }
 
     fn handle_key_left(&mut self) {
-        if self.pane_state.focused_pane() == FocusedPane::Blocks {
+        if self.pane_state.focus() == FocusedPane::Blocks {
             self.pane_state = PaneState::JustBlocks;
             return;
         }
@@ -677,7 +659,7 @@ impl<'a> TUI<'a> {
 
     fn handle_key_up(&mut self) {
         match self.configuring_columns {
-            false => match self.pane_state.focused_pane() {
+            false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
@@ -709,7 +691,7 @@ impl<'a> TUI<'a> {
                 let col_count = self.column_count();
                 scroll_down_one(&mut self.column_list_state, col_count);
             }
-            false => match self.pane_state.focused_pane() {
+            false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
@@ -740,7 +722,7 @@ impl<'a> TUI<'a> {
                 if let Some(i) = self.column_list_state.selected() {
                     // TODO(2021-09-11) this entire codebase is ugly but this is
                     //                  especially gnarly
-                    match self.pane_state.focused_pane() {
+                    match self.pane_state.focus() {
                         FocusedPane::Blocks => {
                             self.columns[i].enabled = !self.columns[i].enabled;
                         }
@@ -809,7 +791,7 @@ impl<'a> TUI<'a> {
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
-        let column_items: Vec<ListItem> = match self.pane_state.focused_pane() {
+        let column_items: Vec<ListItem> = match self.pane_state.focus() {
             FocusedPane::Blocks => columns_to_list_items(&self.columns),
             FocusedPane::Transactions => columns_to_list_items(&self.txn_columns),
             FocusedPane::Transaction => vec![ListItem::new(Span::raw("nothing to configure"))],
@@ -868,7 +850,7 @@ impl<'a> TUI<'a> {
             .map(|hash| util::format_block_hash(hash.as_bytes()))
             .unwrap_or("Transaction".to_string());
 
-        let is_focused = self.pane_state.focused_pane() == FocusedPane::Transaction;
+        let is_focused = self.pane_state.focus() == FocusedPane::Transaction;
         let widget = Paragraph::new(Span::raw("")).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -925,17 +907,18 @@ impl<'a> TUI<'a> {
             block_lines
         };
 
+        let is_focused = self.pane_state.focus() == FocusedPane::Blocks;
         let block_list = HeaderList::new(block_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(
-                        Style::default().fg(self.pane_state.focused_pane().blocks_border_color()),
+                        Style::default().fg(border_color(is_focused))
                     )
                     .title("Blocks"),
             )
             .highlight_style(
-                Style::default().bg(self.pane_state.focused_pane().blocks_selection_color()),
+                Style::default().bg(selection_color(is_focused)),
             )
             .header(header);
         frame.render_stateful_widget(block_list, area, &mut self.block_list_state);
@@ -1098,17 +1081,18 @@ impl<'a> TUI<'a> {
 
         let title = self.txn_list_title();
 
+        let is_focused = self.pane_state.focus() == FocusedPane::Transactions;
         let txn_list = HeaderList::new(txn_items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(
-                        Style::default().fg(self.pane_state.focused_pane().txns_border_color()),
+                        Style::default().fg(border_color(is_focused)),
                     )
                     .title(title),
             )
             .highlight_style(
-                Style::default().bg(self.pane_state.focused_pane().txns_selection_color()),
+                Style::default().bg(selection_color(is_focused)),
             )
             .header(header);
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
@@ -1219,7 +1203,7 @@ impl<'a> TUI<'a> {
         // there is not enough room for everybody to fit
         // the focused pane should get priority
 
-        if self.pane_state.focused_pane() == FocusedPane::Blocks {
+        if self.pane_state.focus() == FocusedPane::Blocks {
             if available_width < blocks_min_width + transactions_min_width {
                 return (available_width, 0);
             }
