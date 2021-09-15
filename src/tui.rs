@@ -170,7 +170,7 @@ fn default_txn_columns() -> Vec<Column<Transaction>> {
                 None => "???".to_string(),
                 Some(i) => i.to_string(),
             }),
-            enabled: true,
+            enabled: false,
         },
         Column {
             name: "hash",
@@ -226,15 +226,29 @@ fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
             enabled: true,
         },
         Column {
-            name: "block time (UTC)",
-            width: 19,
+            name: "date UTC",
+            width: 10,
             render: Box::new(|block| {
                 let timestamp = block.timestamp;
                 let low64 = timestamp.as_u64(); // TODO: panics if too big
                 let low64signed = low64.try_into().unwrap(); // TODO: panic
                 let naive_time = NaiveDateTime::from_timestamp(low64signed, 0);
                 let time = DateTime::<Utc>::from_utc(naive_time, Utc);
-                time.format("%Y-%m-%d %H:%M:%S").to_string()
+                time.format("%Y-%m-%d").to_string()
+            }),
+            enabled: false,
+        },
+        Column {
+            name: "time UTC",
+            width: 8,
+            render: Box::new(|block| {
+                let timestamp = block.timestamp;
+                let low64 = timestamp.as_u64(); // TODO: panics if too big
+                let low64signed = low64.try_into().unwrap(); // TODO: panic
+                let naive_time = NaiveDateTime::from_timestamp(low64signed, 0);
+                let time = DateTime::<Utc>::from_utc(naive_time, Utc);
+                // %Y-%m-%d for when you want to add the date back in
+                time.format("%H:%M:%S").to_string()
             }),
             enabled: true,
         },
