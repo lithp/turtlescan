@@ -1140,7 +1140,7 @@ impl TUI {
                         Constraint::Length(blocks_width),
                         Constraint::Length(txns_width),
                     ])
-                    .split(pane_chunk);
+                    .split(horiz_chunks[0]);
 
                 self.draw_block_list(frame, horiz_chunks[0], block_fetcher);
                 self.draw_txn_list(frame, horiz_chunks[1], block_fetcher);
@@ -1181,7 +1181,7 @@ impl TUI {
         };
 
         // just enough room for the header to remain visible
-        let blocks_min_width = 8;
+        let blocks_min_width = 10;
         let transactions_min_width = 15;
 
         if available_width > blocks_desired_width + txns_desired_width {
