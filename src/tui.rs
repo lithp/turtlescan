@@ -370,16 +370,16 @@ fn block_to_txn_list_items(
 
 #[derive(Copy, Clone)]
 enum FocusedPane {
-    Blocks(),
-    Transactions(),
+    Blocks,
+    Transactions,
 }
 
 impl FocusedPane {
     fn toggle(self) -> FocusedPane {
         use FocusedPane::*;
         match self {
-            Blocks() => Transactions(),
-            Transactions() => Blocks(),
+            Blocks => Transactions,
+            Transactions => Blocks,
         }
     }
 
@@ -389,16 +389,16 @@ impl FocusedPane {
     fn blocks_border_color(&self) -> Color {
         use FocusedPane::*;
         match self {
-            Blocks() => FocusedPane::FOCUSED_BORDER,
-            Transactions() => FocusedPane::UNFOCUSED_BORDER,
+            Blocks => FocusedPane::FOCUSED_BORDER,
+            Transactions => FocusedPane::UNFOCUSED_BORDER,
         }
     }
 
     fn txns_border_color(&self) -> Color {
         use FocusedPane::*;
         match self {
-            Blocks() => FocusedPane::UNFOCUSED_BORDER,
-            Transactions() => FocusedPane::FOCUSED_BORDER,
+            Blocks => FocusedPane::UNFOCUSED_BORDER,
+            Transactions => FocusedPane::FOCUSED_BORDER,
         }
     }
 
@@ -408,8 +408,8 @@ impl FocusedPane {
     fn blocks_selection_color(&self) -> Color {
         use FocusedPane::*;
         match self {
-            Blocks() => FocusedPane::FOCUSED_SELECTION,
-            Transactions() => FocusedPane::UNFOCUSED_SELECTION,
+            Blocks => FocusedPane::FOCUSED_SELECTION,
+            Transactions => FocusedPane::UNFOCUSED_SELECTION,
         }
     }
 
@@ -417,8 +417,8 @@ impl FocusedPane {
         // TODO: I'm missing an abstraction which removes this tedium
         use FocusedPane::*;
         match self {
-            Blocks() => FocusedPane::UNFOCUSED_SELECTION,
-            Transactions() => FocusedPane::FOCUSED_SELECTION,
+            Blocks => FocusedPane::UNFOCUSED_SELECTION,
+            Transactions => FocusedPane::FOCUSED_SELECTION,
         }
     }
 }
@@ -525,7 +525,7 @@ impl TUI {
 
             configuring_columns: false,
             showing_transactions: false,
-            focused_pane: FocusedPane::Blocks(),
+            focused_pane: FocusedPane::Blocks,
 
             txn_columns: txn_columns,
             txn_column_len: txn_column_len,
@@ -545,8 +545,8 @@ impl TUI {
 
     fn column_count(&self) -> usize {
         match self.focused_pane {
-            FocusedPane::Blocks() => self.column_items_len,
-            FocusedPane::Transactions() => self.txn_column_len,
+            FocusedPane::Blocks => self.column_items_len,
+            FocusedPane::Transactions => self.txn_column_len,
         }
     }
 
@@ -562,11 +562,11 @@ impl TUI {
         match self.showing_transactions {
             true => {
                 self.showing_transactions = false;
-                self.focused_pane = FocusedPane::Blocks();
+                self.focused_pane = FocusedPane::Blocks;
             }
             false => {
                 self.showing_transactions = true;
-                self.focused_pane = FocusedPane::Transactions();
+                self.focused_pane = FocusedPane::Transactions;
             }
         };
     }
@@ -574,7 +574,7 @@ impl TUI {
     fn handle_key_up(&mut self) {
         match self.configuring_columns {
             false => match self.focused_pane {
-                FocusedPane::Blocks() => {
+                FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
                         .unwrap_or(0)
@@ -586,7 +586,7 @@ impl TUI {
                     // track per-block scroll state?
                     self.txn_list_state.select(None);
                 }
-                FocusedPane::Transactions() => {
+                FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_up_one(&mut self.txn_list_state, item_count);
                 }
@@ -605,7 +605,7 @@ impl TUI {
                 scroll_down_one(&mut self.column_list_state, col_count);
             }
             false => match self.focused_pane {
-                FocusedPane::Blocks() => {
+                FocusedPane::Blocks => {
                     let item_count = self
                         .block_list_height
                         .unwrap_or(0)
@@ -619,7 +619,7 @@ impl TUI {
                     // the list
                     self.txn_list_state.select(None);
                 }
-                FocusedPane::Transactions() => {
+                FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
                     scroll_down_one(&mut self.txn_list_state, item_count);
                 }
@@ -635,10 +635,10 @@ impl TUI {
                     // TODO(2021-09-11) this entire codebase is ugly but this is
                     //                  especially gnarly
                     match self.focused_pane {
-                        FocusedPane::Blocks() => {
+                        FocusedPane::Blocks => {
                             self.columns[i].enabled = !self.columns[i].enabled;
                         }
-                        FocusedPane::Transactions() => {
+                        FocusedPane::Transactions => {
                             self.txn_columns[i].enabled = !self.txn_columns[i].enabled;
                         }
                     };
@@ -708,8 +708,8 @@ impl TUI {
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let column_items: Vec<ListItem> = match self.focused_pane {
-            FocusedPane::Blocks() => columns_to_list_items(&self.columns),
-            FocusedPane::Transactions() => columns_to_list_items(&self.txn_columns),
+            FocusedPane::Blocks => columns_to_list_items(&self.columns),
+            FocusedPane::Transactions => columns_to_list_items(&self.txn_columns),
         };
 
         let popup = List::new(column_items.clone())
