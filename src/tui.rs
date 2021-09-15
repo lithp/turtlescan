@@ -789,20 +789,87 @@ impl TUI {
         self.block_list_height = Some(area.height.into());
     }
 
+    fn block_list_selected_block(&self) -> Option<u64> {
+        match self.block_list_state.selected() {
+            None => None,
+            Some(offset) => {
+                let highest_block_number = {
+                    let block_number_opt = self.highest_block.lock().unwrap();
+                    block_number_opt.unwrap()
+                };
+
+                // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
+                Some(highest_block_number - (offset as u64))
+            }
+        }
+    }
+
+    // nb this is not given a block_fetcher so it cannot fire off requests
+    fn txn_list_title(&self) -> String {
+        //TODO(2021-09-14) ick! how can you make this simpler?
+        enum State {
+            Ready,
+            FetchingTxns,
+            FetchingReceipts,
+        }
+        use State::*;
+
+        let state = || {
+            let block = self.block_list_selected_block();
+            if let None = block {
+                return Ready;
+            }
+            let block = block.unwrap();
+
+            let blockarc = self.blocks_to_txns.get(&block);
+            if let None = blockarc {
+                return Ready;
+            }
+            let blockarc = blockarc.unwrap();
+
+            {
+                use RequestStatus::*;
+
+                let fetch = blockarc.lock().unwrap();
+                match *fetch {
+                    Waiting() | Started() => return FetchingTxns,
+                    Completed(_) => (),
+                }
+            }
+
+            let receiptsarc = self.block_receipts.get(&block);
+            if let None = receiptsarc {
+                return FetchingReceipts;
+            }
+            let receiptsarc = receiptsarc.unwrap();
+
+            {
+                use RequestStatus::*;
+
+                let fetch = receiptsarc.lock().unwrap();
+                match *fetch {
+                    Waiting() | Started() => return FetchingReceipts,
+                    Completed(_) => return Ready,
+                }
+            }
+        };
+
+        match state() {
+            Ready => "Transactions".to_string(),
+            FetchingTxns => "Transactions (fetching)".to_string(),
+            FetchingReceipts => "Transactions (fetching receipts)".to_string(),
+        }
+    }
+
     fn draw_txn_list<B: Backend>(
         &mut self,
         frame: &mut Frame<B>,
         area: Rect,
         block_fetcher: &Networking,
     ) {
-        let txn_items = if let Some(offset) = self.block_list_state.selected() {
-            let highest_block_number = {
-                let block_number_opt = self.highest_block.lock().unwrap();
-                block_number_opt.unwrap()
-            };
-            // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
-            let block_at_offset = highest_block_number - (offset as u64);
+        let block_selection = self.block_list_selected_block();
 
+        let txn_items = if let Some(block_at_offset) = block_selection {
             let block_arcfetch = match self.blocks_to_txns.get(&block_at_offset) {
                 None => {
                     let new_fetch = block_fetcher.fetch_block_with_txns(block_at_offset);
@@ -881,12 +948,14 @@ impl TUI {
             txn_header
         };
 
+        let title = self.txn_list_title();
+
         let txn_list = HeaderList::new(txn_items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.focused_pane.txns_border_color()))
-                    .title("Transactions"),
+                    .title(title),
             )
             .highlight_style(Style::default().bg(self.focused_pane.txns_selection_color()))
             .header(header);
@@ -1164,12 +1233,9 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 
                 let receipts = provider.get_block_receipts(blocknum).await.unwrap();
 
-                if receipts.len() == 0 {
-                    // other branches reproduce this failure mode by calling unwrap(),
-                    // adding a panic here to make failures very visible and prod me to
-                    // handle them the right way
-                    panic!("could not fetch receipts for block");
-                }
+                // annoyingly, there's no way to know whether 0 receipts is an error or
+                // not unless we remember how many txns we expect to receive
+                // TODO(2021-09-14): add that memory to the fetch!
 
                 arc_fetch.complete(receipts);
                 tx.send(Ok(UIMessage::Refresh())).unwrap();
