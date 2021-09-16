@@ -696,16 +696,36 @@ impl<'a> TUI<'a> {
         self.pane_state = self.pane_state.close_all_to_right();
     }
 
+    fn scroll_block_list_to_top(&mut self) {
+        if let Some(highest) = self.database.get_highest_block() {
+            self.block_list_selected_block = Some(highest);
+            self.txn_list_state.select(None);
+        }
+    }
+
     fn handle_key_up(&mut self) {
         match self.configuring_columns {
             false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
                     match self.block_list_selected_block {
-                        None => {} //TODO: select the bottommost block?
-                        Some(selected_block) => {
-                            self.block_list_selected_block = Some(selected_block + 1);
+                        None => {}
+                        /*
+                            self.block_list_selected_block = Some(0);
+                        }
+                        */
+                        Some(selection) => {
+                            if let Some(highest) = self.database.get_highest_block() {
+                                let new_selection = cmp::min(highest, selection + 1);
+                                self.block_list_selected_block = Some(new_selection);
+                                self.txn_list_state.select(None);
+                            }
                         }
                     };
+
+                    // it doesn't make sense to persist this if we're looking at
+                    // txns for a new block. In the far future maybe this should
+                    // track per-block scroll state?
+                    self.txn_list_state.select(None);
 
                     // TODO: add this back in!
                     /*
@@ -716,11 +736,6 @@ impl<'a> TUI<'a> {
                     // if we're already at the highest block do nothing
                     // otherwise: increment the block selection
                     //            if we're higher than the tip scroll the highest_block
-
-                    // it doesn't make sense to persist this if we're looking at
-                    // txns for a new block. In the far future maybe this should
-                    // track per-block scroll state?
-                    self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -747,6 +762,7 @@ impl<'a> TUI<'a> {
                         None => self.block_list_selected_block = self.block_list_top_block,
                         Some(selected_block) => {
                             self.block_list_selected_block = Some(selected_block - 1);
+                            self.txn_list_state.select(None);
                             /*
                             let top_block = self.block_list_top_block.unwrap();
                             let height = self.block_list_height.unwrap() as u64;
@@ -823,6 +839,24 @@ impl<'a> TUI<'a> {
         self.database.block_receipts.remove(&blocknum);
         self.database.blocks_to_txns.remove(&blocknum);
 
+        if let Some(top) = self.block_list_top_block {
+            if let Some(highest) = self.database.get_highest_block() {
+                if top == highest {
+                    /*
+                     * This might not be the best design, it relies on how some other part
+                     * of the code works. During draw if there's a conflict between
+                     * top_block and selected_block then selected_block takes priority.
+                     *
+                     * So, this line will cause us to scroll up as new blocks arrive, but
+                     * only if that doesn't push the currently selected block off-screen
+                     */
+                    self.block_list_top_block = Some(blocknum);
+                }
+            }
+        }
+
+        self.database.bump_highest_block(blocknum);
+
         // TODO: if a new block arrives while we're looking at the most recent blocks
         //       we want to scroll the list of blocks!
 
@@ -847,8 +881,6 @@ impl<'a> TUI<'a> {
             }
         };
         */
-
-        self.database.bump_highest_block(blocknum);
     }
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
@@ -1012,6 +1044,34 @@ impl<'a> TUI<'a> {
         frame.render_widget(widget, area);
     }
 
+    fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -> (u64, u64) {
+        // if you have a list of height 1 the top block and bottom block are the same
+        let height_offset = height.saturating_sub(1);
+
+        match selected_block {
+            None => {
+                let bottom_block = top_block.saturating_sub(height_offset);
+                return (bottom_block, top_block);
+            }
+            Some(selection) => {
+                if selection > top_block {
+                    // we need to scroll up
+                    let bottom_block = selection.saturating_sub(height_offset);
+                    return (bottom_block, selection);
+                }
+
+                let bottom_block = top_block.saturating_sub(height_offset);
+                if selection < bottom_block {
+                    // we need to scroll down
+                    let top_block = selection + height_offset;
+                    return (selection, top_block);
+                }
+
+                return (bottom_block, top_block);
+            }
+        }
+    }
+
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
         assert!(!self.database.get_highest_block().is_none());
         assert!(!self.block_list_top_block.is_none());
@@ -1025,43 +1085,13 @@ impl<'a> TUI<'a> {
             return;
         }
 
-        let highest_block = self.database.get_highest_block().unwrap();
-        self.block_list_selected_block = self
-            .block_list_selected_block
-            .map(|selection| cmp::min(selection, highest_block));
-
-        /*
-         * when thinking about where the +1 comes from consider that if the height is 1
-         * then the top block and the bottom block are the same block
-         */
         let target_height = target_height as u64;
-        let mut top_block = self.block_list_top_block.unwrap();
-        let mut bottom_block = top_block.saturating_sub(target_height) + 1;
-        debug!(
-            "start height={} top={} bottom={}",
-            target_height, top_block, bottom_block
+        let (bottom_block, top_block) = TUI::block_list_bounds(
+            target_height,
+            self.block_list_top_block.unwrap(),
+            self.block_list_selected_block,
         );
-
-        // scroll the pane to accomodate the given selection, if necessary
-        if let Some(selection) = self.block_list_selected_block {
-            if selection < bottom_block {
-                bottom_block = selection;
-                top_block = bottom_block + target_height - 1;
-                self.block_list_top_block = Some(top_block);
-                debug!(
-                    " adj down sel={} top={} bottom={}",
-                    selection, top_block, bottom_block
-                );
-            } else if selection > top_block {
-                top_block = selection;
-                bottom_block = top_block.saturating_sub(target_height) + 1;
-                self.block_list_top_block = Some(top_block);
-                debug!(
-                    " adj up sel={} top={} bottom={}",
-                    selection, top_block, bottom_block
-                );
-            }
-        };
+        self.block_list_top_block = Some(top_block);
 
         let mut block_list_state = ListState::default();
         if let Some(selection) = self.block_list_selected_block {
@@ -1389,6 +1419,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 Key::Right => tui.handle_key_right(),
                 Key::Left => tui.handle_key_left(),
                 Key::Char(' ') => tui.handle_key_space(),
+                Key::Char('g') => tui.scroll_block_list_to_top(),
                 Key::Char('\t') => tui.handle_tab(true),
                 Key::BackTab => tui.handle_tab(false),
                 key => {
