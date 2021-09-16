@@ -1098,17 +1098,11 @@ impl<'a> TUI<'a> {
             //TODO: error handling?
             let offset = top_block - selection;
             block_list_state.select(Some(offset as usize));
-            debug!(" select sel={} offset={}", selection, offset);
         }
-
-        let block_range = (bottom_block)..(top_block + 1);
-        debug!(
-            " range h={} b={} t={}",
-            target_height, bottom_block, top_block
-        );
 
         let header = columns_to_header(&self.columns);
 
+        let block_range = (bottom_block)..(top_block + 1);
         let block_lines = {
             let block_lines: Vec<ListItem> = block_range
                 .rev()
@@ -1131,13 +1125,20 @@ impl<'a> TUI<'a> {
             block_lines
         };
 
+        let highest_block = self.database.get_highest_block().unwrap();
+        let is_behind = top_block != highest_block;
+        let title = match is_behind {
+            false => "Blocks".to_string(),
+            true => format!("Blocks ({} behind)", highest_block - top_block),
+        };
+
         let is_focused = self.pane_state.focus() == FocusedPane::Blocks;
         let block_list = HeaderList::new(block_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(border_color(is_focused)))
-                    .title("Blocks"),
+                    .title(title),
             )
             .highlight_style(Style::default().bg(selection_color(is_focused)))
             .header(header);
