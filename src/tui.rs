@@ -330,9 +330,9 @@ fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
         Column {
             name: "base fee",
             width: 8,
-            render: Box::new(|block| {
-                let base_fee = block.base_fee_per_gas.expect("block has no base fee");
-                util::humanize_u256(base_fee)
+            render: Box::new(|block| match block.base_fee_per_gas {
+                None => "???".to_string(),
+                Some(base_fee) => util::humanize_u256(base_fee),
             }),
             enabled: true,
         },
@@ -696,11 +696,96 @@ impl<'a> TUI<'a> {
         self.pane_state = self.pane_state.close_all_to_right();
     }
 
+    fn handle_scroll_up_one_page(&mut self) {
+        // TODO(2021-09-16): handle other panes
+        if self.pane_state.focus() != FocusedPane::Blocks {
+            return;
+        }
+
+        if let None = self.block_list_top_block {
+            return;
+        }
+        let top_block = self.block_list_top_block.unwrap();
+
+        if let None = self.block_list_height {
+            return;
+        }
+        let height = self.block_list_height.unwrap() as u64;
+
+        let highest = self.database.get_highest_block();
+        if let None = highest {
+            return;
+        }
+        let highest = highest.unwrap();
+
+        if let None = self.block_list_selected_block {
+            let new_top = top_block + height;
+            let new_top = cmp::min(highest, new_top);
+            self.block_list_top_block = Some(new_top);
+            return;
+        }
+
+        let selection = self.block_list_selected_block.unwrap();
+        let new_selection = selection + height;
+        let new_selection = cmp::min(highest, new_selection);
+        self.block_list_selected_block = Some(new_selection);
+        self.txn_list_state.select(None);
+        // no need to adjust the top_block, draw() will do that for us
+    }
+
+    fn handle_scroll_down_one_page(&mut self) {
+        // TODO(2021-09-16): handle other panes
+        if self.pane_state.focus() != FocusedPane::Blocks {
+            return;
+        }
+
+        if let None = self.block_list_top_block {
+            return;
+        }
+        let top_block = self.block_list_top_block.unwrap();
+
+        if let None = self.block_list_height {
+            return;
+        }
+        let height = self.block_list_height.unwrap() as u64;
+
+        if let None = self.block_list_selected_block {
+            let new_top = top_block.saturating_sub(height);
+            self.block_list_top_block = Some(new_top);
+            return;
+        }
+
+        let selection = self.block_list_selected_block.unwrap();
+        let new_selection = selection.saturating_sub(height);
+        self.block_list_selected_block = Some(new_selection);
+        self.txn_list_state.select(None);
+        // no need to adjust the top_block, draw() will do that for us
+    }
+
+    fn handle_scroll_to_top(&mut self) {
+        match self.pane_state.focus() {
+            FocusedPane::Blocks => self.scroll_block_list_to_top(),
+            _ => (), //TODO: implement this
+        };
+    }
+
+    fn handle_scroll_to_bottom(&mut self) {
+        match self.pane_state.focus() {
+            FocusedPane::Blocks => self.scroll_block_list_to_bottom(),
+            _ => (), //TODO: implement this
+        };
+    }
+
     fn scroll_block_list_to_top(&mut self) {
         if let Some(highest) = self.database.get_highest_block() {
             self.block_list_selected_block = Some(highest);
             self.txn_list_state.select(None);
         }
+    }
+
+    fn scroll_block_list_to_bottom(&mut self) {
+        self.block_list_selected_block = Some(0);
+        self.txn_list_state.select(None);
     }
 
     fn handle_key_up(&mut self) {
@@ -1419,8 +1504,11 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
                 Key::Down => tui.handle_key_down(),
                 Key::Right => tui.handle_key_right(),
                 Key::Left => tui.handle_key_left(),
+                Key::PageUp => tui.handle_scroll_up_one_page(),
+                Key::PageDown => tui.handle_scroll_down_one_page(),
                 Key::Char(' ') => tui.handle_key_space(),
-                Key::Char('g') => tui.scroll_block_list_to_top(),
+                Key::Char('g') => tui.handle_scroll_to_top(),
+                Key::Char('G') => tui.handle_scroll_to_bottom(),
                 Key::Char('\t') => tui.handle_tab(true),
                 Key::BackTab => tui.handle_tab(false),
                 key => {
