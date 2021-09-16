@@ -27,7 +27,7 @@ use termion::input::TermRead;
 
 use simple_error::SimpleError;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, U64};
 
@@ -528,8 +528,9 @@ const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
 
 struct TUI<'a> {
     /* UI state */
-    block_list_state: ListState,
     block_list_height: Option<usize>,
+    block_list_top_block: Option<u64>,
+    block_list_selected_block: Option<u64>,
 
     column_list_state: ListState,
 
@@ -608,8 +609,10 @@ impl<'a> TUI<'a> {
         let receipt_column_len = receipt_columns.len();
 
         TUI {
-            block_list_state: ListState::default(),
             block_list_height: None,
+
+            block_list_top_block: None,
+            block_list_selected_block: None,
 
             column_list_state: list_state_with_selection(Some(0)),
 
@@ -654,13 +657,10 @@ impl<'a> TUI<'a> {
 
         match self.pane_state {
             JustBlocks => {
-                match self.block_list_state.selected() {
-                    None => {} // can't inspect a block, there is no block to inspect
-                    Some(_) => {
-                        // no need to worry about which block is selected, the UI will
-                        // read it again when we draw on the next loop
-                        self.pane_state = BlocksTransactions(1);
-                    }
+                if let Some(_) = self.block_list_selected_block {
+                    // no need to worry about which block is selected, the UI will
+                    // read it again when we draw on the next loop
+                    self.pane_state = BlocksTransactions(1);
                 }
             }
 
@@ -700,11 +700,22 @@ impl<'a> TUI<'a> {
         match self.configuring_columns {
             false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
-                    let item_count = self
-                        .block_list_height
-                        .unwrap_or(0)
-                        .saturating_sub(BLOCK_LIST_BORDER_HEIGHT);
+                    match self.block_list_selected_block {
+                        None => {} //TODO: select the bottommost block?
+                        Some(selected_block) => {
+                            self.block_list_selected_block = Some(selected_block + 1);
+                        }
+                    };
+
+                    // TODO: add this back in!
+                    /*
+
                     scroll_up_one(&mut self.block_list_state, item_count);
+                    */
+
+                    // if we're already at the highest block do nothing
+                    // otherwise: increment the block selection
+                    //            if we're higher than the tip scroll the highest_block
 
                     // it doesn't make sense to persist this if we're looking at
                     // txns for a new block. In the far future maybe this should
@@ -732,11 +743,19 @@ impl<'a> TUI<'a> {
             }
             false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
-                    let item_count = self
-                        .block_list_height
-                        .unwrap_or(0)
-                        .saturating_sub(BLOCK_LIST_BORDER_HEIGHT);
-                    scroll_down_one(&mut self.block_list_state, item_count);
+                    match self.block_list_selected_block {
+                        None => self.block_list_selected_block = self.block_list_top_block,
+                        Some(selected_block) => {
+                            self.block_list_selected_block = Some(selected_block - 1);
+                            /*
+                            let top_block = self.block_list_top_block.unwrap();
+                            let height = self.block_list_height.unwrap() as u64;
+                            if top_block.saturating_sub(selected_block) > height {
+                                self.block_list_top_block = Some(top_block-1);
+                            }
+                            */
+                        }
+                    };
 
                     // it doesn't make sense to persist this if we're looking at txns
                     // for a new block.
@@ -785,30 +804,33 @@ impl<'a> TUI<'a> {
     }
 
     fn handle_new_block(&mut self, block: EthBlock<TxHash>) {
-        debug!("UI received new block {}", block.number.unwrap());
+        let blocknum = block.number.unwrap().low_u64();
+        debug!("UI received new block blocknum={}", blocknum);
 
         // we cannot add this block directly because it is missing a bunch of
         // fields that we would like to render so instead we add a placeholder and
         // ask the networking thread to give us a better block
         // let new_fetch = Arc::new(Mutex::new(RequestStatus::Completed(block)));
 
-        // TODO(2021-09-09) this is not necessarily a brand new block
-        //                  there could have been a reorg, and it's possible
-        //                  this block is replacing a previous one. we should
-        //                  insert this block fetch into the correct location
-        // TODO(2021-09-10) we should also update blocks_to_txns when we detect a
-        //                  reorg
-        let block_num = block.number.unwrap().low_u64();
+        // in the typical case this is a new block extending the canonical chain
+        // however, during a reorg we will receive a sequence of new blocks which
+        // overwrite existing blocks in the canonical chain. By removing the entries we
+        // cause the UI to trigger new fetches next time a draw() happens.
+        // this will cause the UI to temporarily be in an inconsistent state, the shown
+        // sequence of blocks will not form a consistent chain, but that state of affairs
+        // should only persist for a few frames.
+        self.database.blocknum_to_block.remove(&blocknum);
+        self.database.block_receipts.remove(&blocknum);
+        self.database.blocks_to_txns.remove(&blocknum);
 
-        let new_fetch = self.database.fetch_block(block_num);
-        self.database.blocks.push_front(new_fetch);
+        // TODO: if a new block arrives while we're looking at the most recent blocks
+        //       we want to scroll the list of blocks!
 
-        // TODO(2021-09-11): I think a lot of this logic will become easier if the
-        //                   selection were stored as a highlighted block number
-        //                   rather than an offset
+        /*
+        if let Some(selected_blocknum) = self.block_list_selected_block {
 
-        // when a new block comes in we want the same block to remain selected,
-        // unless we're already at the end of the list
+        }
+
         match self.block_list_state.selected() {
             None => {} // there is no selection to update
             Some(i) => {
@@ -824,8 +846,9 @@ impl<'a> TUI<'a> {
                 }
             }
         };
+        */
 
-        self.database.set_highest_block(block_num);
+        self.database.bump_highest_block(blocknum);
     }
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
@@ -849,7 +872,7 @@ impl<'a> TUI<'a> {
     }
 
     fn txn_list_selected_txn_index(&mut self) -> Option<(u64, usize)> {
-        let selected_block: Option<u64> = self.block_list_selected_block();
+        let selected_block: Option<u64> = self.block_list_selected_block;
 
         if let None = selected_block {
             return None;
@@ -990,45 +1013,87 @@ impl<'a> TUI<'a> {
     }
 
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let target_height = area.height;
-        let target_height = {
-            // the border consumes 2 lines
-            if target_height > 2 {
-                target_height - 2
-            } else {
-                target_height
+        assert!(!self.database.get_highest_block().is_none());
+        assert!(!self.block_list_top_block.is_none());
+
+        let target_height = area.height.saturating_sub(BLOCK_LIST_BORDER_HEIGHT as u16);
+
+        // TODO: will this ever panic? u16 into a usize
+        self.block_list_height = Some(target_height.into());
+
+        if target_height <= 0 {
+            return;
+        }
+
+        let highest_block = self.database.get_highest_block().unwrap();
+        self.block_list_selected_block = self
+            .block_list_selected_block
+            .map(|selection| cmp::min(selection, highest_block));
+
+        /*
+         * when thinking about where the +1 comes from consider that if the height is 1
+         * then the top block and the bottom block are the same block
+         */
+        let target_height = target_height as u64;
+        let mut top_block = self.block_list_top_block.unwrap();
+        let mut bottom_block = top_block.saturating_sub(target_height) + 1;
+        debug!(
+            "start height={} top={} bottom={}",
+            target_height, top_block, bottom_block
+        );
+
+        // scroll the pane to accomodate the given selection, if necessary
+        if let Some(selection) = self.block_list_selected_block {
+            if selection < bottom_block {
+                bottom_block = selection;
+                top_block = bottom_block + target_height - 1;
+                self.block_list_top_block = Some(top_block);
+                debug!(
+                    " adj down sel={} top={} bottom={}",
+                    selection, top_block, bottom_block
+                );
+            } else if selection > top_block {
+                top_block = selection;
+                bottom_block = top_block.saturating_sub(target_height) + 1;
+                self.block_list_top_block = Some(top_block);
+                debug!(
+                    " adj up sel={} top={} bottom={}",
+                    selection, top_block, bottom_block
+                );
             }
         };
 
-        // the size we will give the block list widget
-        while target_height > self.database.blocks.len() as u16 {
-            // unwrapping is safe because the tui does not render until the network first
-            // fetches the higest block, and the highest block is never set back to None
-            let highest_block_number = self.database.get_highest_block().unwrap();
-
-            let new_fetch = self.database.fetch_block(
-                // TODO: if the chain is very young this could underflow
-                highest_block_number - self.database.blocks.len() as u64,
-            );
-            self.database.blocks.push_back(new_fetch);
+        let mut block_list_state = ListState::default();
+        if let Some(selection) = self.block_list_selected_block {
+            //TODO: error handling?
+            let offset = top_block - selection;
+            block_list_state.select(Some(offset as usize));
+            debug!(" select sel={} offset={}", selection, offset);
         }
+
+        let block_range = (bottom_block)..(top_block + 1);
+        debug!(
+            " range h={} b={} t={}",
+            target_height, bottom_block, top_block
+        );
 
         let header = columns_to_header(&self.columns);
 
         let block_lines = {
-            let block_lines: Vec<ListItem> = self
-                .database
-                .blocks
+            let block_lines: Vec<ListItem> = block_range
+                .rev()
+                .map(|blocknum| (blocknum, self.database.get_block(blocknum)))
+                // if we do not do this rust complains there are multiple active closures
+                // which reference self which... might be a legitimate complaint?
+                // TODO(2021-09-16) any better ways to fix this problem?
+                .collect::<Vec<(u64, RequestStatus<EthBlock<TxHash>>)>>()
                 .iter()
-                .map(|block_request| {
-                    let height = block_request.0;
-                    let fetch = block_request.1.lock().unwrap();
-
+                .map(|(height, fetch)| {
                     use RequestStatus::*;
-                    let formatted = match &*fetch {
+                    let formatted = match fetch {
                         Waiting() => format!("{} waiting", height),
                         Started() => format!("{} fetching", height),
-                        Completed(block) => render_item_with_cols(&self.columns, block),
+                        Completed(block) => render_item_with_cols(&self.columns, &block),
                     };
                     ListItem::new(Span::raw(formatted))
                 })
@@ -1046,23 +1111,7 @@ impl<'a> TUI<'a> {
             )
             .highlight_style(Style::default().bg(selection_color(is_focused)))
             .header(header);
-        frame.render_stateful_widget(block_list, area, &mut self.block_list_state);
-
-        // TODO: will this ever panic? u16 into a usize
-        self.block_list_height = Some(area.height.into());
-    }
-
-    /// nb: assumes we have a highest block, will panic if that is not true
-    fn block_list_selected_block(&self) -> Option<u64> {
-        match self.block_list_state.selected() {
-            None => None,
-            Some(offset) => {
-                let highest_block = self.database.get_highest_block().unwrap();
-
-                // TODO(bug): this logic is aspirational, and breaks because of the reorg bug
-                Some(highest_block - (offset as u64))
-            }
-        }
+        frame.render_stateful_widget(block_list, area, &mut block_list_state);
     }
 
     fn txn_list_title(&mut self) -> &'static str {
@@ -1070,7 +1119,7 @@ impl<'a> TUI<'a> {
         const FETCHING_TXNS: &str = "Transactions (fetching)";
         const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
 
-        let block = self.block_list_selected_block();
+        let block = self.block_list_selected_block;
         if let None = block {
             return READY;
         }
@@ -1091,7 +1140,7 @@ impl<'a> TUI<'a> {
     }
 
     fn draw_txn_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let block_selection = self.block_list_selected_block();
+        let block_selection = self.block_list_selected_block;
 
         let txn_items = if let Some(block_at_offset) = block_selection {
             let block_fetch = self.database.get_block_with_transactions(block_at_offset);
@@ -1165,6 +1214,11 @@ impl<'a> TUI<'a> {
             );
             return;
         }
+
+        if let None = self.block_list_top_block {
+            self.block_list_top_block = self.database.get_highest_block();
+            assert!(!self.block_list_top_block.is_none());
+        };
 
         let vert_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1354,9 +1408,10 @@ struct Database {
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, ArcFetchTxns>,
-    blocks: VecDeque<BlockRequest>,
     block_receipts: HashMap<u64, ArcFetchReceipts>,
     highest_block: Arc<Mutex<Option<u64>>>,
+
+    blocknum_to_block: HashMap<u64, ArcFetchBlock>,
 }
 
 impl Database {
@@ -1379,9 +1434,9 @@ impl Database {
             network_tx: network_tx,
 
             highest_block: highest_block,
-            blocks: VecDeque::new(),
             blocks_to_txns: HashMap::new(),
             block_receipts: HashMap::new(),
+            blocknum_to_block: HashMap::new(),
         }
     }
 
@@ -1422,7 +1477,7 @@ impl Database {
     }
 
     // TODO: return result
-    fn set_highest_block(&self, blocknum: u64) {
+    fn bump_highest_block(&self, blocknum: u64) {
         let mut highest_block_opt = self.highest_block.lock().unwrap();
 
         if let Some(highest_block_number) = *highest_block_opt {
@@ -1437,6 +1492,25 @@ impl Database {
     fn get_highest_block(&self) -> Option<u64> {
         let highest_block_opt = self.highest_block.lock().unwrap();
         highest_block_opt.clone()
+    }
+
+    fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>> {
+        //TODO(2021-09-16) some version of entry().or_insert_with() should be able to
+        //                 replace this but I haven't been able to convince the borrow
+        //                 checker
+        let arcfetch = match self.blocknum_to_block.get(&blocknum) {
+            None => {
+                let new_fetch = self.fetch_block(blocknum);
+
+                debug!("fired new request for block {}", blocknum);
+                self.blocknum_to_block.insert(blocknum, new_fetch.1);
+                self.blocknum_to_block.get(&blocknum).unwrap()
+            }
+            Some(arcfetch) => arcfetch,
+        };
+
+        let blockfetch = arcfetch.lock().unwrap();
+        blockfetch.clone()
     }
 
     fn get_block_with_transactions(
