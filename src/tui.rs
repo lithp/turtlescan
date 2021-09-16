@@ -1223,7 +1223,7 @@ impl<'a> TUI<'a> {
         // TODO: if both panes are active show (Tab) focus {the other pane}
 
         let status_string = match self.configuring_columns {
-            false => "  (q) quit - (c) configure columns",
+            false => "  (q) quit - (c) configure columns - (←/→) open/close panes - (tab) change focused pane",
             true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
         };
 
