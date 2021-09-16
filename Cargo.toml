@@ -1,6 +1,6 @@
 [package]
 name = "turtlescan"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2018"
 description = "Explore Ethereum from the safety of your shell"
 repository = "https://github.com/lithp/turtlescan"
