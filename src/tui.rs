@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 use tui::backend::TermionBackend;
-use tui::text::{Span, Spans};
+use tui::text::{Span, Spans, Text};
 use tui::Terminal;
 
 use tui::backend::Backend;
@@ -29,7 +29,7 @@ use simple_error::SimpleError;
 
 use std::collections::{HashMap, VecDeque};
 
-use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, H256};
+use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, U64};
 
 use std::sync::mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -151,15 +151,65 @@ struct Column<T> {
 }
 
 fn default_receipt_columns() -> Vec<Column<TransactionReceipt>> {
-    vec![Column {
-        name: "gas used",
-        width: 9,
-        render: Box::new(|receipt| match receipt.gas_used {
-            None => "???".to_string(),
-            Some(gas) => gas.to_string(),
-        }),
-        enabled: true,
-    }]
+    vec![
+        Column {
+            name: "status",
+            width: 7,
+            render: Box::new(|receipt| match receipt.status {
+                None => "unknown".to_string(),
+
+                //TODO(2021-09-15) the docs for this are backwards, contribute a fix!
+                Some(status) => {
+                    if status == U64::from(0) {
+                        "failure".to_string()
+                    } else if status == U64::from(1) {
+                        "success".to_string()
+                    } else {
+                        panic!("unexpected txn status: {}", status)
+                    }
+                }
+            }),
+            enabled: false,
+        },
+        Column {
+            // "gas used is None if the client is running in light client mode"
+            name: "gas used",
+            width: 9,
+            render: Box::new(|receipt| match receipt.gas_used {
+                None => "???".to_string(),
+                Some(gas) => gas.to_string(),
+            }),
+            enabled: true,
+        },
+        Column {
+            name: "total gas",
+            width: 9,
+            render: Box::new(|receipt| receipt.cumulative_gas_used.to_string()),
+            enabled: true,
+        },
+        Column {
+            // TODO in the details pane only render this column if it's Some
+            name: "deployed to",
+            width: 12,
+            render: Box::new(|receipt| {
+                receipt
+                    .contract_address
+                    .map(|addr| addr.to_string())
+                    .unwrap_or("not deployed".to_string())
+            }),
+            enabled: false,
+        },
+        Column {
+            // TODO(2021-09-15): actually render the logs, this reqires writing some parsers
+            name: "log count",
+            width: 9,
+            render: Box::new(|receipt| receipt.logs.len().to_string()),
+            enabled: false,
+        }, // root: Option<H256>
+           // logs_bloom: Bloom
+           // effective_gas_price: Option<U256>
+           //   base fee + priority fee
+    ]
 }
 
 fn default_txn_columns() -> Vec<Column<Transaction>> {
@@ -206,7 +256,7 @@ fn default_txn_columns() -> Vec<Column<Transaction>> {
 }
 
 fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
-    // TODO(2021-09-09) also include the block timestamp
+    //TODO(2021-09-15) also include the uncle count
     vec![
         Column {
             name: "blk num",
@@ -798,7 +848,7 @@ impl<'a> TUI<'a> {
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
     }
 
-    fn txn_list_selected_txn(&mut self) -> Option<H256> {
+    fn txn_list_selected_txn_index(&mut self) -> Option<(u64, usize)> {
         let selected_block: Option<u64> = self.block_list_selected_block();
 
         if let None = selected_block {
@@ -806,33 +856,131 @@ impl<'a> TUI<'a> {
         }
         let selected_block: u64 = selected_block.unwrap();
 
-        let fetch = self.database.get_block_with_transactions(selected_block);
-
-        use RequestStatus::*;
-
         match self.txn_list_state.selected() {
             None => None,
-            Some(offset) => match fetch {
-                Waiting() | Started() => return None,
-                Completed(block) => {
-                    if offset >= block.transactions.len() {
-                        panic!("inconsistent state");
-                    }
+            Some(offset) => Some((selected_block, offset)),
+        }
+    }
 
-                    return Some(block.transactions[offset].hash);
+    fn txn_list_selected_txn(&mut self) -> Option<Transaction> {
+        let selection = self.txn_list_selected_txn_index();
+        if let None = selection {
+            return None;
+        }
+        let (block, offset) = selection.unwrap();
+
+        use RequestStatus::*;
+        let fetch = self.database.get_block_with_transactions(block);
+        match fetch {
+            Waiting() | Started() => return None,
+            Completed(block) => {
+                if offset >= block.transactions.len() {
+                    panic!("inconsistent state");
                 }
-            },
+
+                return Some(block.transactions[offset].clone());
+            }
+        }
+    }
+
+    fn txn_list_selected_receipt(&mut self) -> Option<TransactionReceipt> {
+        let selection = self.txn_list_selected_txn_index();
+        if let None = selection {
+            return None;
+        }
+        let (block, offset) = selection.unwrap();
+
+        use RequestStatus::*;
+        let fetch = self.database.get_block_receipts(block);
+        match fetch {
+            Waiting() | Started() => return None,
+            Completed(receipts) => {
+                if offset >= receipts.len() {
+                    panic!("inconsistent state");
+                }
+
+                // TODO: the value was already cloned by get_block_receipts...
+                return Some(receipts[offset].clone());
+            }
         }
     }
 
     fn draw_transaction_details<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let title = self
-            .txn_list_selected_txn()
-            .map(|hash| util::format_block_hash(hash.as_bytes()))
+        let selected_txn: Option<Transaction> = self.txn_list_selected_txn();
+
+        let title = selected_txn
+            .as_ref()
+            .map(|txn| util::format_block_hash(txn.hash.as_bytes()))
             .unwrap_or("Transaction".to_string());
 
+        let text = if let Some(txn) = selected_txn {
+            let receipt = self.txn_list_selected_receipt();
+            let receipt_spans = match receipt {
+                None => vec![Spans::from("receipt: (fetching)")],
+                Some(receipt) => {
+                    //TODO(2021-09-15) no reason to build a new one every time
+                    //                 how do rust globals work? thread locals?
+                    let columns = default_receipt_columns();
+
+                    let mut result = vec![Spans::from("receipt:")];
+
+                    result.extend::<Vec<Spans>>(
+                        columns
+                            .iter()
+                            .map(|col| {
+                                Spans::from(format!("  {}: {}", col.name, (col.render)(&receipt)))
+                            })
+                            .collect(),
+                    );
+
+                    result
+                }
+            };
+
+            let mut txn_spans = vec![
+                Spans::from("txn:"),
+                //TODO: should probably unify these with the txn columns
+                //TODO: widen the hash based on available space
+                Spans::from(format!("  hash: {}", txn.hash.to_string())),
+                Spans::from(format!("  from: {}", txn.from.to_string())),
+                Spans::from(format!("    nonce: {}", txn.nonce.to_string())),
+                Spans::from(format!(
+                    "  to: {}",
+                    txn.to
+                        .map(|hash| hash.to_string())
+                        .unwrap_or("None".to_string())
+                )),
+                Spans::from(format!("  value: {}", txn.value.to_string())),
+                // TODO(2021-09-15) implement this
+                // Spans::from(format!("  data: {}", txn.input.to_string())),
+                Spans::from(format!(
+                    "  gas price: {}",
+                    txn.gas_price
+                        .map(|price| price.to_string())
+                        .unwrap_or("None".to_string())
+                )),
+                Spans::from(format!(
+                    "  max priority fee: {}",
+                    txn.max_priority_fee_per_gas
+                        .map(|fee| fee.to_string())
+                        .unwrap_or("None".to_string())
+                )),
+                Spans::from(format!(
+                    "  max gas fee: {}",
+                    txn.max_fee_per_gas
+                        .map(|fee| fee.to_string())
+                        .unwrap_or("None".to_string())
+                )),
+            ];
+            txn_spans.extend(receipt_spans);
+
+            Text::from(txn_spans)
+        } else {
+            Text::raw("")
+        };
+
         let is_focused = self.pane_state.focus() == FocusedPane::Transaction;
-        let widget = Paragraph::new(Span::raw("")).block(
+        let widget = Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color(is_focused)))
