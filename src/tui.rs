@@ -104,12 +104,12 @@ impl<T> ArcStatus<T> {
     }
 }
 
-type ArcFetch = ArcStatus<EthBlock<TxHash>>;
+type ArcFetchBlock = ArcStatus<EthBlock<TxHash>>;
 type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
 type ArcFetchReceipts = ArcStatus<Vec<TransactionReceipt>>;
 
 #[derive(Clone)]
-struct BlockRequest(u64, ArcFetch);
+struct BlockRequest(u64, ArcFetchBlock);
 
 #[derive(Clone)]
 struct BlockTxnsRequest(u64, ArcFetchTxns);
