@@ -846,6 +846,11 @@ impl<'a> TUI<'a> {
                     match self.block_list_selected_block {
                         None => self.block_list_selected_block = self.block_list_top_block,
                         Some(selected_block) => {
+                            if selected_block == 0 {
+                                // do not change the selection do not clear txn_list_state
+                                return;
+                            }
+
                             self.block_list_selected_block = Some(selected_block - 1);
                             self.txn_list_state.select(None);
                             /*
