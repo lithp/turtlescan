@@ -703,6 +703,11 @@ impl<'a> TUI<'a> {
     }
 
     fn handle_scroll_to_top(&mut self) {
+        if self.configuring_columns {
+            self.column_list_state.select(Some(0));
+            return;
+        }
+
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_top(),
             FocusedPane::Transactions => {
@@ -713,6 +718,12 @@ impl<'a> TUI<'a> {
     }
 
     fn handle_scroll_to_bottom(&mut self) {
+        if self.configuring_columns {
+            let length = self.column_count();
+            self.column_list_state.select(Some(length.saturating_sub(1)));
+            return;
+        }
+
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_bottom(),
             FocusedPane::Transactions => {
