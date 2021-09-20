@@ -257,10 +257,10 @@ fn render_item_with_cols<T>(columns: &Vec<Column<T>>, item: &T) -> String {
         })
 }
 
-fn columns_to_list_items<T>(columns: &Vec<Column<T>>) -> Vec<ListItem<'static>> {
+fn columns_to_list_items<T>(columns: &Vec<Column<T>>, offset: usize) -> Vec<ListItem<'static>> {
     columns
         .iter()
-        .fold((Vec::new(), 0), |(mut result, count), col| {
+        .fold((Vec::new(), offset), |(mut result, count), col| {
             if col.enabled {
                 let s = format!("[{}] {}", count, col.name);
                 result.push(ListItem::new(Span::raw(s)));
@@ -431,7 +431,7 @@ struct TUI<'a> {
     txn_column_len: usize,
 
     receipt_columns: Vec<Column<TransactionReceipt>>,
-    _receipt_column_len: usize,
+    receipt_column_len: usize,
 
     columns: Vec<Column<EthBlock<TxHash>>>,
     column_items_len: usize,
@@ -516,7 +516,7 @@ impl<'a> TUI<'a> {
             column_items_len: column_items_len,
 
             receipt_columns: receipt_columns,
-            _receipt_column_len: receipt_column_len,
+            receipt_column_len: receipt_column_len,
 
             database: database,
         }
@@ -525,7 +525,7 @@ impl<'a> TUI<'a> {
     fn column_count(&self) -> usize {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.column_items_len,
-            FocusedPane::Transactions => self.txn_column_len,
+            FocusedPane::Transactions => self.txn_column_len + self.receipt_column_len,
             FocusedPane::Transaction => 0, // nothing to configure
         }
     }
@@ -810,8 +810,12 @@ impl<'a> TUI<'a> {
                             self.columns[i].enabled = !self.columns[i].enabled;
                         }
                         FocusedPane::Transactions => {
-                            // TODO(2021-09-20) also consider receipt columns
-                            self.txn_columns[i].enabled = !self.txn_columns[i].enabled;
+                            if i < self.txn_columns.len() {
+                                self.txn_columns[i].enabled = !self.txn_columns[i].enabled;
+                            } else {
+                                let i = i - self.txn_columns.len();
+                                self.receipt_columns[i].enabled = !self.receipt_columns[i].enabled;
+                            }
                         }
                         FocusedPane::Transaction => {
                             // this pane has no columns to configure
@@ -871,8 +875,15 @@ impl<'a> TUI<'a> {
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let column_items: Vec<ListItem> = match self.pane_state.focus() {
-            FocusedPane::Blocks => columns_to_list_items(&self.columns),
-            FocusedPane::Transactions => columns_to_list_items(&self.txn_columns),
+            FocusedPane::Blocks => columns_to_list_items(&self.columns, 0),
+            FocusedPane::Transactions => {
+                let mut items = columns_to_list_items(&self.txn_columns, 0);
+                items.extend(columns_to_list_items(
+                    &self.receipt_columns,
+                    self.txn_columns.len(),
+                ));
+                items
+            }
             FocusedPane::Transaction => vec![ListItem::new(Span::raw("nothing to configure"))],
         };
 
