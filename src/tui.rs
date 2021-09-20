@@ -447,7 +447,7 @@ fn list_state_with_selection(selection: Option<usize>) -> ListState {
 
 fn scroll_up_one(state: &mut ListState, item_count: usize) {
     if item_count == 0 {
-        state.select(Some(0));
+        state.select(None);
         return;
     }
 
@@ -611,7 +611,7 @@ impl<'a> TUI<'a> {
         let new_selection = selection + height;
         let new_selection = cmp::min(highest, new_selection);
         self.block_list_selected_block = Some(new_selection);
-        self.txn_list_state.select(Some(0));
+        self.txn_list_state.select(None);
         // no need to adjust the top_block, draw() will do that for us
     }
 
@@ -698,7 +698,7 @@ impl<'a> TUI<'a> {
         let selection = self.block_list_selected_block.unwrap();
         let new_selection = selection.saturating_sub(height);
         self.block_list_selected_block = Some(new_selection);
-        self.txn_list_state.select(Some(0));
+        self.txn_list_state.select(None);
         // no need to adjust the top_block, draw() will do that for us
     }
 
@@ -719,13 +719,13 @@ impl<'a> TUI<'a> {
     fn scroll_block_list_to_top(&mut self) {
         if let Some(highest) = self.database.get_highest_block() {
             self.block_list_selected_block = Some(highest);
-            self.txn_list_state.select(Some(0));
+            self.txn_list_state.select(None);
         }
     }
 
     fn scroll_block_list_to_bottom(&mut self) {
         self.block_list_selected_block = Some(0);
-        self.txn_list_state.select(Some(0));
+        self.txn_list_state.select(None);
     }
 
     fn handle_key_up(&mut self) {
@@ -738,7 +738,7 @@ impl<'a> TUI<'a> {
                             if let Some(highest) = self.database.get_highest_block() {
                                 let new_selection = cmp::min(highest, selection + 1);
                                 self.block_list_selected_block = Some(new_selection);
-                                self.txn_list_state.select(Some(0));
+                                self.txn_list_state.select(None);
                             }
                         }
                     };
@@ -746,7 +746,7 @@ impl<'a> TUI<'a> {
                     // it doesn't make sense to persist this if we're looking at
                     // txns for a new block. In the far future maybe this should
                     // track per-block scroll state?
-                    self.txn_list_state.select(Some(0));
+                    self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -778,7 +778,7 @@ impl<'a> TUI<'a> {
                             }
 
                             self.block_list_selected_block = Some(selected_block - 1);
-                            self.txn_list_state.select(Some(0));
+                            self.txn_list_state.select(None);
                         }
                     };
 
@@ -787,7 +787,7 @@ impl<'a> TUI<'a> {
                     // TODO(bug): techincally we should not throw away the state if the
                     // selection did not change, such as if there is only one block in
                     // the list
-                    self.txn_list_state.select(Some(0));
+                    self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -1177,18 +1177,26 @@ impl<'a> TUI<'a> {
             use data::RequestStatus::*;
             match block_fetch {
                 Waiting() => {
+                    self.txn_list_state.select(None);
+
                     vec![ListItem::new(Span::raw(format!(
                         "{} waiting",
                         block_at_offset
                     )))]
                 }
                 Started() => {
+                    self.txn_list_state.select(None);
+
                     vec![ListItem::new(Span::raw(format!(
                         "{} fetching",
                         block_at_offset
                     )))]
                 }
                 Completed(block) => {
+                    if let None = self.txn_list_state.selected() {
+                        self.txn_list_state.select(Some(0));
+                    }
+
                     let receipts: Option<&Vec<TransactionReceipt>> =
                         if let Completed(ref receipts) = receipts_fetch {
                             Some(receipts)
