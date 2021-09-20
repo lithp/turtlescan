@@ -681,10 +681,6 @@ impl<'a> TUI<'a> {
                 FocusedPane::Blocks => {
                     match self.block_list_selected_block {
                         None => {}
-                        /*
-                            self.block_list_selected_block = Some(0);
-                        }
-                        */
                         Some(selection) => {
                             if let Some(highest) = self.database.get_highest_block() {
                                 let new_selection = cmp::min(highest, selection + 1);
@@ -698,16 +694,6 @@ impl<'a> TUI<'a> {
                     // txns for a new block. In the far future maybe this should
                     // track per-block scroll state?
                     self.txn_list_state.select(None);
-
-                    // TODO: add this back in!
-                    /*
-
-                    scroll_up_one(&mut self.block_list_state, item_count);
-                    */
-
-                    // if we're already at the highest block do nothing
-                    // otherwise: increment the block selection
-                    //            if we're higher than the tip scroll the highest_block
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -771,6 +757,7 @@ impl<'a> TUI<'a> {
                             self.columns[i].enabled = !self.columns[i].enabled;
                         }
                         FocusedPane::Transactions => {
+                            // TODO(2021-09-20) also consider receipt columns
                             self.txn_columns[i].enabled = !self.txn_columns[i].enabled;
                         }
                         FocusedPane::Transaction => {
@@ -793,10 +780,9 @@ impl<'a> TUI<'a> {
         let blocknum = block.number.unwrap().low_u64();
         debug!("UI received new block blocknum={}", blocknum);
 
-        // we cannot add this block directly because it is missing a bunch of
-        // fields that we would like to render so instead we add a placeholder and
-        // ask the networking thread to give us a better block
-        // let new_fetch = Arc::new(Mutex::new(RequestStatus::Completed(block)));
+        // it may seem a little weird that we throw away most of the {block} struct which
+        // is passed in but this block came from eth_subscription and a bunch of Option's
+        // are None.
 
         // in the typical case this is a new block extending the canonical chain
         // however, during a reorg we will receive a sequence of new blocks which
@@ -805,6 +791,7 @@ impl<'a> TUI<'a> {
         // this will cause the UI to temporarily be in an inconsistent state, the shown
         // sequence of blocks will not form a consistent chain, but that state of affairs
         // should only persist for a few frames.
+        // TODO(2021-09-20) law of demeter: this should probably be an invalidate() method
         self.database.blocknum_to_block.remove(&blocknum);
         self.database.block_receipts.remove(&blocknum);
         self.database.blocks_to_txns.remove(&blocknum);
@@ -826,31 +813,6 @@ impl<'a> TUI<'a> {
         }
 
         self.database.bump_highest_block(blocknum);
-
-        // TODO: if a new block arrives while we're looking at the most recent blocks
-        //       we want to scroll the list of blocks!
-
-        /*
-        if let Some(selected_blocknum) = self.block_list_selected_block {
-
-        }
-
-        match self.block_list_state.selected() {
-            None => {} // there is no selection to update
-            Some(i) => {
-                if let Some(height) = self.block_list_height {
-                    // if there is a populated block list to scroll (there is)
-                    if i < (height - BLOCK_LIST_BORDER_HEIGHT).into() {
-                        // if we're not already at the end of the list
-                        self.block_list_state.select(Some(i + 1));
-                    } else {
-                        // the selected block has changed
-                        self.txn_list_state.select(None);
-                    }
-                }
-            }
-        };
-        */
     }
 
     //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
@@ -1274,8 +1236,6 @@ impl<'a> TUI<'a> {
         }
 
         let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
-
-        // TODO: if both panes are active show (Tab) focus {the other pane}
 
         let status_string = match self.configuring_columns {
             false => "  (q) quit - (c) configure columns - (←/→) open/close panes - (tab) change focused pane",
