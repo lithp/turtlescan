@@ -720,7 +720,8 @@ impl<'a> TUI<'a> {
     fn handle_scroll_to_bottom(&mut self) {
         if self.configuring_columns {
             let length = self.column_count();
-            self.column_list_state.select(Some(length.saturating_sub(1)));
+            self.column_list_state
+                .select(Some(length.saturating_sub(1)));
             return;
         }
 
@@ -803,7 +804,7 @@ impl<'a> TUI<'a> {
 
                     // it doesn't make sense to persist this if we're looking at txns
                     // for a new block.
-                    // TODO(bug): techincally we should not throw away the state if the
+                    // TODO(bug): technically we should not throw away the state if the
                     // selection did not change, such as if there is only one block in
                     // the list
                     self.txn_list_state.select(None);
@@ -891,7 +892,6 @@ impl<'a> TUI<'a> {
         self.database.bump_highest_block(blocknum);
     }
 
-    //TODO(2021-09-14) this should also allow (dis/en)abling the receipt columns
     fn draw_popup<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let column_items: Vec<ListItem> = match self.pane_state.focus() {
             FocusedPane::Blocks => columns_to_list_items(&self.columns, 0),
