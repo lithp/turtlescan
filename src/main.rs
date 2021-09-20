@@ -1,5 +1,6 @@
 extern crate simple_error;
 
+mod data;
 mod tail_blocks;
 mod tui;
 mod util;
