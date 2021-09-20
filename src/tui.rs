@@ -853,13 +853,6 @@ impl<'a> TUI<'a> {
 
                             self.block_list_selected_block = Some(selected_block - 1);
                             self.txn_list_state.select(None);
-                            /*
-                            let top_block = self.block_list_top_block.unwrap();
-                            let height = self.block_list_height.unwrap() as u64;
-                            if top_block.saturating_sub(selected_block) > height {
-                                self.block_list_top_block = Some(top_block-1);
-                            }
-                            */
                         }
                     };
 
