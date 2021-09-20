@@ -705,14 +705,22 @@ impl<'a> TUI<'a> {
     fn handle_scroll_to_top(&mut self) {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_top(),
-            _ => (), //TODO: implement this
+            FocusedPane::Transactions => {
+                self.txn_list_state.select(Some(0));
+            }
+            FocusedPane::Transaction => {}
         };
     }
 
     fn handle_scroll_to_bottom(&mut self) {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_bottom(),
-            _ => (), //TODO: implement this
+            FocusedPane::Transactions => {
+                if let Some(length) = self.txn_list_length {
+                    self.txn_list_state.select(Some(length.saturating_sub(1)))
+                };
+            }
+            FocusedPane::Transaction => {}
         };
     }
 
@@ -1310,7 +1318,7 @@ impl<'a> TUI<'a> {
         let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
         let status_string = match self.configuring_columns {
-            false => "  (q) quit - (c) configure columns - (←/→) open/close panes - (tab) change focused pane",
+            false => "  (q) quit - (c) configure columns - (←/→) open/close panes - (tab) change focused pane - (g/G) jump to top/bottom",
             true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
         };
 
