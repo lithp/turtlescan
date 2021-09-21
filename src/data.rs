@@ -2,12 +2,13 @@ use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxH
 use ethers_providers::StreamExt;
 use ethers_providers::{JsonRpcClient, Middleware, Provider, Ws};
 use flexbuffers;
-use log::{debug, warn};
+use log::debug;
 use serde::ser::Serialize;
 use simple_error::SimpleError;
 use sled;
 use std::collections::HashMap;
 use std::default::Default;
+use std::error::Error;
 use std::io;
 use std::path;
 use std::sync::mpsc;
@@ -113,6 +114,90 @@ enum NetworkRequest {
     Block(BlockRequest),
     BlockWithTxns(BlockTxnsRequest),
     BlockReceipts(BlockReceiptsRequest),
+}
+
+impl NetworkRequest {
+    fn start(&self) -> Result<Progress, SimpleError> {
+        use NetworkRequest::*;
+        match self {
+            Block(BlockRequest(blocknum, arcfetch)) => {
+                arcfetch.start_if_waiting()?;
+                return Ok(Progress::BlockNoTx(*blocknum, RequestStatus::Started()));
+            }
+            BlockWithTxns(BlockTxnsRequest(blocknum, arcfetch)) => {
+                arcfetch.start_if_waiting()?;
+                return Ok(Progress::BlockTx(*blocknum, RequestStatus::Started()));
+            }
+            BlockReceipts(BlockReceiptsRequest(blocknum, arcfetch)) => {
+                arcfetch.start_if_waiting()?;
+                return Ok(Progress::BlockReceipt(*blocknum, RequestStatus::Started()));
+            }
+        }
+    }
+
+    async fn fetch<T: JsonRpcClient>(
+        &self,
+        provider: &Provider<T>,
+    ) -> Result<Progress, Box<dyn Error>> {
+        use NetworkRequest::*;
+        match self {
+            Block(BlockRequest(blocknum, arcfetch)) => {
+                let network_result = provider.get_block(*blocknum).await;
+                let block_opt = network_result?;
+                let block = block_opt.ok_or(SimpleError::new(format!(
+                    "no such block blocknum={}",
+                    blocknum
+                )))?;
+
+                // TODO: ick
+                {
+                    let block_clone = block.clone();
+                    arcfetch.complete(block_clone);
+                }
+
+                return Ok(Progress::BlockNoTx(
+                    *blocknum,
+                    RequestStatus::Completed(block),
+                ));
+            }
+            BlockWithTxns(BlockTxnsRequest(blocknum, arcfetch)) => {
+                let network_result = provider.get_block_with_txs(*blocknum).await;
+                let block_opt = network_result?;
+                let block = block_opt.ok_or(SimpleError::new(format!(
+                    "no such block blocknum={}",
+                    blocknum
+                )))?;
+
+                {
+                    let block_clone = block.clone();
+                    arcfetch.complete(block_clone);
+                }
+
+                return Ok(Progress::BlockTx(
+                    *blocknum,
+                    RequestStatus::Completed(block),
+                ));
+            }
+            BlockReceipts(BlockReceiptsRequest(blocknum, arcfetch)) => {
+                let network_result = provider.get_block_receipts(*blocknum).await;
+                let receipts: Vec<TransactionReceipt> = network_result?;
+
+                // annoyingly, there's no way to know whether 0 receipts is an error or
+                // not unless we remember how many txns we expect to receive
+                // TODO(2021-09-14): add that memory to the fetch!
+
+                {
+                    let receipts_clone = receipts.clone();
+                    arcfetch.complete(receipts_clone);
+                }
+
+                return Ok(Progress::BlockReceipt(
+                    *blocknum,
+                    RequestStatus::Completed(receipts),
+                ));
+            }
+        }
+    }
 }
 
 enum Progress {
@@ -424,78 +509,10 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 ) {
     loop {
         let request = network_rx.recv().await.unwrap(); // blocks until we have more input
-
-        match request {
-            NetworkRequest::Block(BlockRequest(block_number, arc_fetch)) => {
-                if let Err(err) = arc_fetch.start_if_waiting() {
-                    warn!("arcfetch error: {}", err);
-                    continue;
-                }
-                result_tx
-                    .send(Progress::BlockNoTx(block_number, RequestStatus::Started()))
-                    .unwrap();
-
-                let complete_block = provider.get_block(block_number).await.unwrap().unwrap();
-                let cloned = complete_block.clone();
-                arc_fetch.complete(complete_block);
-                result_tx
-                    .send(Progress::BlockNoTx(
-                        block_number,
-                        RequestStatus::Completed(cloned),
-                    ))
-                    .unwrap();
-            }
-            NetworkRequest::BlockWithTxns(BlockTxnsRequest(block_number, arc_fetch)) => {
-                if let Err(err) = arc_fetch.start_if_waiting() {
-                    warn!("arcfetch error: {}", err);
-                    continue;
-                }
-                result_tx
-                    .send(Progress::BlockTx(block_number, RequestStatus::Started()))
-                    .unwrap();
-
-                // the first unwrap is b/c the network request might have failed
-                // the second unwrap is b/c the requested block number might not exist
-                let complete_block = provider
-                    .get_block_with_txs(block_number)
-                    .await
-                    .unwrap()
-                    .unwrap();
-
-                let cloned = complete_block.clone();
-                arc_fetch.complete(complete_block);
-                result_tx
-                    .send(Progress::BlockTx(
-                        block_number,
-                        RequestStatus::Completed(cloned),
-                    ))
-                    .unwrap();
-            }
-            NetworkRequest::BlockReceipts(BlockReceiptsRequest(blocknum, arc_fetch)) => {
-                if let Err(err) = arc_fetch.start_if_waiting() {
-                    warn!("arcfetch error: {}", err);
-                    continue;
-                }
-                result_tx
-                    .send(Progress::BlockReceipt(blocknum, RequestStatus::Started()))
-                    .unwrap();
-
-                let receipts = provider.get_block_receipts(blocknum).await.unwrap();
-
-                // annoyingly, there's no way to know whether 0 receipts is an error or
-                // not unless we remember how many txns we expect to receive
-                // TODO(2021-09-14): add that memory to the fetch!
-
-                let cloned = receipts.clone();
-                arc_fetch.complete(receipts);
-                result_tx
-                    .send(Progress::BlockReceipt(
-                        blocknum,
-                        RequestStatus::Completed(cloned),
-                    ))
-                    .unwrap();
-            }
-        }
+        let progress = request.start().unwrap();
+        result_tx.send(progress).unwrap();
+        let result = request.fetch(&provider).await.unwrap();
+        result_tx.send(result).unwrap();
     }
 }
 
