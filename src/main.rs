@@ -12,11 +12,13 @@ use serde_json;
 use std::convert::TryFrom;
 use std::env;
 use std::error::Error;
+use std::path;
 
 use log::debug;
 use log4rs;
 
 use simple_error::bail;
+use xdg;
 
 // https://mainnet.infura.io/v3/PROJECT_ID
 // wss://mainnet.infura.io/ws/v3/PROJECT_ID
@@ -70,6 +72,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("turtlescan")?;
+    let cache_path = path::Path::new("cache");
+    let cache_path = xdg_dirs.place_cache_file(cache_path)?;
+    debug!("using cache: {:?}", cache_path);
+
     match matches.subcommand_name() {
         Some("getBlock") => {
             let typed_provider = new_provider(provider_url).await?;
@@ -98,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let typed_provider = new_provider(provider_url).await?;
 
             match typed_provider {
-                TypedProvider::Ws(provider) => tui::run_tui(provider),
+                TypedProvider::Ws(provider) => tui::run_tui(provider, cache_path),
                 TypedProvider::Http(_) => bail!("tui requires connecting via websocket"),
             }
         }

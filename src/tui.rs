@@ -12,6 +12,7 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::io;
 use std::iter;
+use std::path;
 use std::sync::mpsc;
 use std::thread;
 use termion::event::Key;
@@ -1388,7 +1389,7 @@ impl<'a> TUI<'a> {
 
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
-pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
+pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
@@ -1419,7 +1420,7 @@ pub fn run_tui(provider: Provider<Ws>) -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let mut database = data::Database::start(provider, tx);
+    let mut database = data::Database::start(provider, tx, cache_path);
     let mut tui = TUI::new(&mut database);
 
     loop {
