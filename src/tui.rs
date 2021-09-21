@@ -1429,7 +1429,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
     // relatively expensive. this is one of the few times where the control flow would
     // be easier to understand if we were allowed to use goto
     let mut queue_was_empty = true;
-    loop {
+    'main: loop {
         let message = if queue_was_empty {
             terminal.draw(|mut f| {
                 tui.draw(&mut f);
@@ -1454,7 +1454,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
 
         match message {
             data::UIMessage::Key(key) => match key {
-                Key::Char('q') | Key::Esc | Key::Ctrl('c') => break,
+                Key::Char('q') | Key::Esc | Key::Ctrl('c') => break 'main,
                 Key::Char('c') => tui.toggle_configuring_columns(),
                 Key::Up => tui.handle_key_up(),
                 Key::Down => tui.handle_key_down(),
