@@ -868,10 +868,7 @@ impl<'a> TUI<'a> {
         // this will cause the UI to temporarily be in an inconsistent state, the shown
         // sequence of blocks will not form a consistent chain, but that state of affairs
         // should only persist for a few frames.
-        // TODO(2021-09-20) law of demeter: this should probably be an invalidate() method
-        self.database.blocknum_to_block.remove(&blocknum);
-        self.database.block_receipts.remove(&blocknum);
-        self.database.blocks_to_txns.remove(&blocknum);
+        self.database.invalidate_block(blocknum);
 
         if let Some(top) = self.block_list_top_block {
             if let Some(highest) = self.database.get_highest_block() {

@@ -258,6 +258,14 @@ impl Database {
         let fetch = arcfetch.lock().unwrap();
         fetch.clone()
     }
+
+    /// this block is no longer valid, likely because a re-org happened, and should be
+    /// re-fetched if we ever ask for it again
+    pub fn invalidate_block(&mut self, blocknum: u64) {
+        self.blocknum_to_block.remove(&blocknum);
+        self.block_receipts.remove(&blocknum);
+        self.blocks_to_txns.remove(&blocknum);
+    }
 }
 
 #[tokio::main(worker_threads = 1)]
