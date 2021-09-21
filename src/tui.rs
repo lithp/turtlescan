@@ -14,6 +14,7 @@ use std::io;
 use std::iter;
 use std::path;
 use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
 use std::thread;
 use termion::event::Key;
 use termion::input::TermRead;
@@ -1423,14 +1424,35 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
     let mut database = data::Database::start(provider, tx, cache_path);
     let mut tui = TUI::new(&mut database);
 
+    // this loop could be easier to understand. it's convoluted because it attempts to
+    // process all pending messages before it does any redraws, because redraws are
+    // relatively expensive. this is one of the few times where the control flow would
+    // be easier to understand if we were allowed to use goto
+    let mut queue_was_empty = true;
     loop {
-        terminal.draw(|mut f| {
-            tui.draw(&mut f);
-        })?;
+        let message = if queue_was_empty {
+            terminal.draw(|mut f| {
+                tui.draw(&mut f);
+            })?;
 
-        let input = rx.recv().unwrap()?; // blocks until we have more input
+            // Result<UIMessage, std::io::Error>
+            rx.recv().unwrap()
+        } else {
+            // Result<Result<UIMessage, std::io::Error>, std::sync::mpsc::TryRecvError>
+            match rx.try_recv() {
+                Err(TryRecvError::Disconnected) => {
+                    return Err(Box::new(TryRecvError::Disconnected))
+                }
+                Err(TryRecvError::Empty) => {
+                    queue_was_empty = true;
+                    continue;
+                }
+                Ok(res) => res,
+            }
+        }?;
+        queue_was_empty = false;
 
-        match input {
+        match message {
             data::UIMessage::Key(key) => match key {
                 Key::Char('q') | Key::Esc | Key::Ctrl('c') => break,
                 Key::Char('c') => tui.toggle_configuring_columns(),
@@ -1451,7 +1473,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
             },
             data::UIMessage::Refresh() => {}
             data::UIMessage::NewBlock(block) => tui.handle_new_block(block),
-        }
+        };
     }
 
     Ok(())

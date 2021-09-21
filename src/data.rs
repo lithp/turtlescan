@@ -390,10 +390,6 @@ fn run_sled(
 
 #[tokio::main(worker_threads = 1)]
 async fn run_networking(
-    /*
-     * Ws is required because we watch for new blocks
-     * TODO(2021-09-14) document this limitation somewhere visible
-     */
     provider: Provider<Ws>,
     highest_block: Arc<Mutex<Option<u64>>>,
     request_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
