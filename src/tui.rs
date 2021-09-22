@@ -14,6 +14,7 @@ use std::io;
 use std::iter;
 use std::path;
 use std::thread;
+use std::time::Instant;
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -1444,9 +1445,16 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
     let mut queue_was_empty = true;
     'main: loop {
         let message = if queue_was_empty {
-            terminal.draw(|mut f| {
-                tui.draw(&mut f);
-            })?;
+            debug!("started draw");
+            {
+                let start = Instant::now();
+                terminal.draw(|mut f| {
+                    tui.draw(&mut f);
+                })?;
+                let duration = start.elapsed();
+
+                debug!(" finished draw elapsed={:?}", duration);
+            }
 
             crossbeam::channel::select! {
                 recv(rx) -> msg_result => {
