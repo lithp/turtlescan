@@ -194,9 +194,6 @@ impl Database {
         }
     }
 
-    // TODO a macro is probably not the right solution here but this seems like a good
-    //      spot to practice generating boilerplate with a macro
-
     // TODO: return result
     pub fn bump_highest_block(&self, blocknum: u64) {
         let mut highest_block_opt = self.highest_block.lock().unwrap();
