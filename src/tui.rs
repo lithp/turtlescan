@@ -13,8 +13,6 @@ use std::error::Error;
 use std::io;
 use std::iter;
 use std::path;
-use std::sync::mpsc;
-use std::sync::mpsc::TryRecvError;
 use std::thread;
 use termion::event::Key;
 use termion::input::TermRead;
@@ -31,6 +29,16 @@ use tui::widgets::{
 };
 use tui::Frame;
 use tui::Terminal;
+
+pub enum UIMessage {
+    // the user has given us some input over stdin
+    Key(termion::event::Key),
+
+    // something in the background has updated state and wants the UI to rerender
+    Refresh(),
+
+    Progress(data::Progress),
+}
 
 struct Column<T> {
     name: &'static str,
@@ -524,6 +532,19 @@ impl<'a> TUI<'a> {
         }
     }
 
+    fn apply_progress(&mut self, progress: data::Progress) {
+        if let data::Progress::NewBlock(ref block) = progress {
+            // it may seem a little weird that we throw away most of the {block} struct
+            // which is passed in but this block came from eth_subscription and a bunch of
+            // Option's are None.
+            let blocknum = block.number.unwrap().low_u64();
+            debug!("UI received new block blocknum={}", blocknum);
+            self.handle_new_block(blocknum);
+        }
+
+        self.database.apply_progress(progress);
+    }
+
     fn column_count(&self) -> usize {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.column_items_len,
@@ -655,11 +676,9 @@ impl<'a> TUI<'a> {
                 // implementation and modify it to allow tweaking offset
             }
             Some(selection) => {
-                debug!("sel: cur={} h={} l={}", selection, height, length);
                 let candidate_selection = selection + height;
                 let selection = cmp::min(candidate_selection, length - 1);
                 self.txn_list_state.select(Some(selection));
-                debug!(" new_selection={}", selection);
             }
         }
     }
@@ -855,14 +874,7 @@ impl<'a> TUI<'a> {
         };
     }
 
-    fn handle_new_block(&mut self, block: EthBlock<TxHash>) {
-        let blocknum = block.number.unwrap().low_u64();
-        debug!("UI received new block blocknum={}", blocknum);
-
-        // it may seem a little weird that we throw away most of the {block} struct which
-        // is passed in but this block came from eth_subscription and a bunch of Option's
-        // are None.
-
+    fn handle_new_block(&mut self, blocknum: u64) {
         // in the typical case this is a new block extending the canonical chain
         // however, during a reorg we will receive a sequence of new blocks which
         // overwrite existing blocks in the canonical chain. By removing the entries we
@@ -1396,7 +1408,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (tx, rx) = mpsc::channel(); // tell the UI thread (this one) what to do
+    let (tx, rx) = crossbeam::channel::unbounded(); // tell the UI thread (this one) what to do
 
     // doing this in the background saves us from needing to do any kind of select!(),
     // all the UI thread needs to do is listen on its channel and all important events
@@ -1406,7 +1418,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
         let stdin = io::stdin().keys();
 
         for key in stdin {
-            let mapped = key.map(|k| data::UIMessage::Key(k));
+            let mapped = key.map(|k| UIMessage::Key(k));
             keys_tx.send(mapped).unwrap();
         }
     });
@@ -1417,11 +1429,12 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
         let mut signals = Signals::new(&[SIGWINCH]).unwrap();
 
         for _signal in signals.forever() {
-            winch_tx.send(Ok(data::UIMessage::Refresh())).unwrap();
+            winch_tx.send(Ok(UIMessage::Refresh())).unwrap();
         }
     });
 
-    let mut database = data::Database::start(provider, tx, cache_path);
+    let mut database = data::Database::start(provider, cache_path);
+    let database_results_rx = database.results_rx.clone();
     let mut tui = TUI::new(&mut database);
 
     // this loop could be easier to understand. it's convoluted because it attempts to
@@ -1435,25 +1448,36 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
                 tui.draw(&mut f);
             })?;
 
-            // Result<UIMessage, std::io::Error>
-            rx.recv().unwrap()
-        } else {
-            // Result<Result<UIMessage, std::io::Error>, std::sync::mpsc::TryRecvError>
-            match rx.try_recv() {
-                Err(TryRecvError::Disconnected) => {
-                    return Err(Box::new(TryRecvError::Disconnected))
+            crossbeam::channel::select! {
+                recv(rx) -> msg_result => {
+                    // first unwrap is crossbeam::channel::RecvError
+                    // second unwrap is std::io::Error
+                    msg_result.unwrap().unwrap()
                 }
-                Err(TryRecvError::Empty) => {
+                recv(database_results_rx) -> msg_result => {
+                    UIMessage::Progress(msg_result.unwrap())
+                }
+            }
+        } else {
+            crossbeam::channel::select! {
+                recv(rx) -> msg_result => {
+                    let msg = msg_result.unwrap();
+                    msg.unwrap()  // remove the io::Error
+                }
+                recv(database_results_rx) -> msg_result => {
+                    let msg = msg_result.unwrap();
+                    UIMessage::Progress(msg)
+                }
+                default => {
                     queue_was_empty = true;
                     continue;
                 }
-                Ok(res) => res,
             }
-        }?;
+        };
         queue_was_empty = false;
 
         match message {
-            data::UIMessage::Key(key) => match key {
+            UIMessage::Key(key) => match key {
                 Key::Char('q') | Key::Esc | Key::Ctrl('c') => break 'main,
                 Key::Char('c') => tui.toggle_configuring_columns(),
                 Key::Up => tui.handle_key_up(),
@@ -1471,8 +1495,11 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
                     debug!("unhandled key press: {:?}", key)
                 }
             },
-            data::UIMessage::Refresh() => {}
-            data::UIMessage::NewBlock(block) => tui.handle_new_block(block),
+            UIMessage::Refresh() => {}
+            UIMessage::Progress(progress) => {
+                debug!(" ui progress: {:?}", progress);
+                tui.apply_progress(progress);
+            }
         };
     }
 

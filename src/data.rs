@@ -9,30 +9,14 @@ use sled;
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
-use std::io;
 use std::path;
-use std::sync::mpsc;
 use std::sync::LockResult;
 use std::sync::MutexGuard;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc as tokio_mpsc;
 
-// TODO: this does not belong in this module but putting it here allows us to break a
-// circular import
-pub enum UIMessage {
-    // the user has given us some input over stdin
-    Key(termion::event::Key),
-
-    // something in the background has updated state and wants the UI to rerender
-    Refresh(),
-
-    // networking has noticed a new block and wants the UI to show it
-    // TODO(2021-09-09) we really only need the block number
-    NewBlock(EthBlock<TxHash>),
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum RequestStatus<T> {
     Waiting(),
     Started(),
@@ -200,7 +184,8 @@ impl NetworkRequest {
     }
 }
 
-enum Progress {
+#[derive(Debug)]
+pub enum Progress {
     HighestBlockNumber(u64),
     NewBlock(EthBlock<TxHash>),
     BlockNoTx(u64, RequestStatus<EthBlock<TxHash>>),
@@ -210,6 +195,7 @@ enum Progress {
 
 pub struct Database {
     sled_tx: crossbeam::channel::Sender<NetworkRequest>,
+    pub results_rx: crossbeam::channel::Receiver<Progress>,
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, ArcFetchTxns>,
@@ -222,14 +208,11 @@ pub struct Database {
 impl Database {
     /// provider: Ws is required because we watch for new blocks
     /// tx: sends messages back to the UI thread (things like Refresh and NewBlock)
-    pub fn start(
-        provider: Provider<Ws>,
-        tx: mpsc::Sender<Result<UIMessage, io::Error>>,
-        cache_path: path::PathBuf,
-    ) -> Database {
+    pub fn start(provider: Provider<Ws>, cache_path: path::PathBuf) -> Database {
         //TODO: return Result
         let cache = sled::open(cache_path).unwrap();
 
+        let (db_results_tx, db_results_rx) = crossbeam::channel::unbounded();
         let (network_requests_tx, mut network_requests_rx) = tokio_mpsc::unbounded_channel();
         let (sled_tx, sled_rx) = crossbeam::channel::unbounded();
         let (network_result_tx, network_result_rx) = crossbeam::channel::unbounded();
@@ -255,7 +238,13 @@ impl Database {
          */
 
         let _handle: thread::JoinHandle<()> = thread::spawn(move || {
-            run_sled(cache, sled_rx, network_requests_tx, network_result_rx, tx);
+            run_sled(
+                cache,
+                sled_rx,
+                network_requests_tx,
+                network_result_rx,
+                db_results_tx,
+            );
         });
 
         // no real need to hold onto this handle, the thread will be killed when this main
@@ -267,16 +256,41 @@ impl Database {
                 &mut network_requests_rx,
                 network_result_tx,
             );
-            // run_networking(provider, highest_block_send, tx, &mut network_rx);
         });
 
         Database {
             sled_tx: sled_tx,
+            results_rx: db_results_rx,
 
             highest_block: highest_block,
             blocks_to_txns: HashMap::new(),
             block_receipts: HashMap::new(),
             blocknum_to_block: HashMap::new(),
+        }
+    }
+
+    pub fn apply_progress(&mut self, progress: Progress) {
+        use Progress::*;
+        match progress {
+            HighestBlockNumber(_) => {
+                // TODO let's come back to this one
+            }
+            NewBlock(_) => {
+                // TODO: at very least this should update the highest block number,
+                //       if appropriate
+            }
+            BlockNoTx(blocknum, status) => {
+                let arc = ArcStatus(Arc::new(Mutex::new(status)));
+                self.blocknum_to_block.insert(blocknum, arc);
+            }
+            BlockTx(blocknum, status) => {
+                let arc = ArcStatus(Arc::new(Mutex::new(status)));
+                self.blocks_to_txns.insert(blocknum, arc);
+            }
+            BlockReceipt(blocknum, status) => {
+                let arc = ArcStatus(Arc::new(Mutex::new(status)));
+                self.block_receipts.insert(blocknum, arc);
+            }
         }
     }
 
@@ -402,7 +416,7 @@ fn run_sled(
     sled_rx: crossbeam::channel::Receiver<NetworkRequest>,
     network_requests_tx: tokio_mpsc::UnboundedSender<NetworkRequest>,
     network_results_rx: crossbeam::channel::Receiver<Progress>,
-    ui_tx: mpsc::Sender<Result<UIMessage, io::Error>>,
+    results_tx: crossbeam::channel::Sender<Progress>,
 ) {
     // loop through all incoming requests and try to satisfy them
     let blocks_tree = sled.open_tree(b"blocks").unwrap();
@@ -423,8 +437,9 @@ fn run_sled(
                             None => {},
                             Some(ivec) => {
                                 let block: EthBlock<TxHash> = flexbuffers::from_slice(&ivec).unwrap();
+                                let clone = block.clone();
                                 arcfetch.complete(block);
-                                ui_tx.send(Ok(UIMessage::Refresh())).unwrap();
+                                results_tx.send(Progress::BlockNoTx(blocknum, RequestStatus::Completed(clone))).unwrap();
                                 continue
                             }
                         }
@@ -443,7 +458,7 @@ fn run_sled(
                 let msg = msg_result.unwrap();
                 use Progress::*;
                 match msg {
-                    BlockNoTx(blocknum, block_status) => {
+                    BlockNoTx(blocknum, ref block_status) => {
                         use RequestStatus::*;
                         match block_status {
                             Waiting() | Started() => {},
@@ -458,16 +473,14 @@ fn run_sled(
                                 debug!("wrote block to db blocknum={}", blocknum);
                             }
                         };
-
-                        ui_tx.send(Ok(UIMessage::Refresh())).unwrap();
                     },
                     HighestBlockNumber(_) | BlockTx(_, _) | BlockReceipt(_,_) => {
-                        ui_tx.send(Ok(UIMessage::Refresh())).unwrap();
                     }
-                    NewBlock(block) => {
-                        ui_tx.send(Ok(UIMessage::NewBlock(block))).unwrap();
+                    NewBlock(_) => {
                     }
                 }
+
+                results_tx.send(msg).unwrap();
             }
         }
     }
@@ -509,8 +522,10 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 ) {
     loop {
         let request = network_rx.recv().await.unwrap(); // blocks until we have more input
+
         let progress = request.start().unwrap();
         result_tx.send(progress).unwrap();
+
         let result = request.fetch(&provider).await.unwrap();
         result_tx.send(result).unwrap();
     }
