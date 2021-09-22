@@ -11,6 +11,7 @@ use std::error::Error;
 use std::path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 use tokio::sync::mpsc as tokio_mpsc;
 
 #[derive(Clone, Debug)]
@@ -26,6 +27,15 @@ enum Request {
     Block(u64),
     BlockWithTxns(u64),
     BlockReceipts(u64),
+}
+
+#[derive(Debug)]
+pub enum Response {
+    HighestBlockNumber(u64),
+    NewBlock(EthBlock<TxHash>),
+    BlockNoTx(u64, RequestStatus<EthBlock<TxHash>>),
+    BlockTx(u64, RequestStatus<EthBlock<Transaction>>),
+    BlockReceipt(u64, RequestStatus<Vec<TransactionReceipt>>),
 }
 
 impl Request {
@@ -85,15 +95,6 @@ impl Request {
             }
         }
     }
-}
-
-#[derive(Debug)]
-pub enum Response {
-    HighestBlockNumber(u64),
-    NewBlock(EthBlock<TxHash>),
-    BlockNoTx(u64, RequestStatus<EthBlock<TxHash>>),
-    BlockTx(u64, RequestStatus<EthBlock<Transaction>>),
-    BlockReceipt(u64, RequestStatus<Vec<TransactionReceipt>>),
 }
 
 pub struct Database {
@@ -282,8 +283,11 @@ fn run_sled(
     network_results_rx: crossbeam::channel::Receiver<Response>,
     results_tx: crossbeam::channel::Sender<Response>,
 ) {
-    // loop through all incoming requests and try to satisfy them
+    // TODO: don't duplicate things, store the blocks and the txns separately and convert
+    //       between them as necessary
     let blocks_tree = sled.open_tree(b"blocks").unwrap();
+    let block_txns_tree = sled.open_tree(b"block_with_txns").unwrap();
+    let block_receipts_tree = sled.open_tree(b"receipts").unwrap();
 
     loop {
         crossbeam::channel::select! {
@@ -294,7 +298,7 @@ fn run_sled(
                 use Request::*;
                 match msg {
                     Block(blocknum) => {
-                        // is it in our database?
+                        let start = Instant::now();
                         let key: [u8; 8] = blocknum.to_be_bytes();
                         let opt = blocks_tree.get(key).unwrap();
                         match opt {
@@ -302,12 +306,36 @@ fn run_sled(
                             Some(ivec) => {
                                 let block: EthBlock<TxHash> = flexbuffers::from_slice(&ivec).unwrap();
                                 results_tx.send(Response::BlockNoTx(blocknum, RequestStatus::Completed(block))).unwrap();
+                                let duration = start.elapsed();
+                                debug!(" fetched block from db elapsed={:?}", duration);
                                 continue
                             }
                         }
-
                     },
-                    BlockWithTxns(_) | BlockReceipts(_) => {},
+                    BlockWithTxns(blocknum) => {
+                        let key: [u8; 8] = blocknum.to_be_bytes();
+                        let opt = block_txns_tree.get(key).unwrap();
+                        match opt {
+                            None => {},
+                            Some(ivec) => {
+                                let block: EthBlock<Transaction> = flexbuffers::from_slice(&ivec).unwrap();
+                                results_tx.send(Response::BlockTx(blocknum, RequestStatus::Completed(block))).unwrap();
+                                continue
+                            }
+                        }
+                    }
+                    BlockReceipts(blocknum) => {
+                        let key: [u8; 8] = blocknum.to_be_bytes();
+                        let opt = block_receipts_tree.get(key).unwrap();
+                        match opt {
+                            None => {},
+                            Some(ivec) => {
+                                let vec: Vec<TransactionReceipt> = flexbuffers::from_slice(&ivec).unwrap();
+                                results_tx.send(Response::BlockReceipt(blocknum, RequestStatus::Completed(vec))).unwrap();
+                                continue
+                            }
+                        }
+                    },
                 }
 
                 if let Err(_) = network_requests_tx.send(msg) {
@@ -336,10 +364,40 @@ fn run_sled(
                             }
                         };
                     },
-                    HighestBlockNumber(_) | BlockTx(_, _) | BlockReceipt(_,_) => {
+                    BlockTx(blocknum, ref block_status) => {
+                        use RequestStatus::*;
+                        match block_status {
+                            Waiting() | Started() => {},
+                            Completed(block) => {
+                                // save the block to the database
+                                let mut s = flexbuffers::FlexbufferSerializer::new();
+                                block.serialize(&mut s).unwrap();
+
+                                let key: [u8; 8] = blocknum.to_be_bytes();
+
+                                block_txns_tree.insert(key, s.view()).unwrap();
+                                debug!("wrote block to db blocknum={}", blocknum);
+                            }
+                        };
                     }
-                    NewBlock(_) => {
+                    BlockReceipt(blocknum, ref status) => {
+                        use RequestStatus::*;
+                        match status {
+                            Waiting() | Started() => {},
+                            Completed(vec) => {
+                                // save the block to the database
+                                let mut s = flexbuffers::FlexbufferSerializer::new();
+                                vec.serialize(&mut s).unwrap();
+
+                                let key: [u8; 8] = blocknum.to_be_bytes();
+
+                                block_receipts_tree.insert(key, s.view()).unwrap();
+                                debug!("wrote block receipts to db blocknum={}", blocknum);
+                            }
+                        };
                     }
+                    HighestBlockNumber(_) => {}
+                    NewBlock(_) => {}
                 }
 
                 results_tx.send(msg).unwrap();
