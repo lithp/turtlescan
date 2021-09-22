@@ -37,7 +37,7 @@ pub enum UIMessage {
     // something in the background has updated state and wants the UI to rerender
     Refresh(),
 
-    Progress(data::Progress),
+    Response(data::Response),
 }
 
 struct Column<T> {
@@ -532,8 +532,8 @@ impl<'a> TUI<'a> {
         }
     }
 
-    fn apply_progress(&mut self, progress: data::Progress) {
-        if let data::Progress::NewBlock(ref block) = progress {
+    fn apply_progress(&mut self, progress: data::Response) {
+        if let data::Response::NewBlock(ref block) = progress {
             // it may seem a little weird that we throw away most of the {block} struct
             // which is passed in but this block came from eth_subscription and a bunch of
             // Option's are None.
@@ -1455,7 +1455,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
                     msg_result.unwrap().unwrap()
                 }
                 recv(database_results_rx) -> msg_result => {
-                    UIMessage::Progress(msg_result.unwrap())
+                    UIMessage::Response(msg_result.unwrap())
                 }
             }
         } else {
@@ -1466,7 +1466,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
                 }
                 recv(database_results_rx) -> msg_result => {
                     let msg = msg_result.unwrap();
-                    UIMessage::Progress(msg)
+                    UIMessage::Response(msg)
                 }
                 default => {
                     queue_was_empty = true;
@@ -1496,7 +1496,7 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
                 }
             },
             UIMessage::Refresh() => {}
-            UIMessage::Progress(progress) => {
+            UIMessage::Response(progress) => {
                 tui.apply_progress(progress);
             }
         };

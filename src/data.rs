@@ -7,11 +7,8 @@ use serde::ser::Serialize;
 use simple_error::SimpleError;
 use sled;
 use std::collections::HashMap;
-use std::default::Default;
 use std::error::Error;
 use std::path;
-use std::sync::LockResult;
-use std::sync::MutexGuard;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -25,96 +22,29 @@ pub enum RequestStatus<T> {
 }
 
 #[derive(Clone)]
-pub struct ArcStatus<T>(Arc<Mutex<RequestStatus<T>>>);
-
-impl<T> Default for ArcStatus<T> {
-    fn default() -> Self {
-        ArcStatus(Arc::new(Mutex::new(RequestStatus::Waiting())))
-    }
-}
-
-impl<T> ArcStatus<T> {
-    // prevents callers from needing to care about .0
-    // if I end up wanting to forward more of these Deref might be the better option
-    fn lock(&self) -> LockResult<MutexGuard<'_, RequestStatus<T>>> {
-        return self.0.lock();
-    }
-
-    /// tell the UI that the request is being handled
-    /// careful, blocks until it can take out a lock!
-    fn start_if_waiting(&self) -> Result<(), SimpleError> {
-        let mut fetch = self.lock().unwrap();
-
-        if let RequestStatus::Waiting() = *fetch {
-            *fetch = RequestStatus::Started();
-            Ok(())
-        } else {
-            Err(SimpleError::new("arc was in the wrong state"))
-        }
-    }
-
-    /// careful, blocks until it can take out a lock
-    /// overwrites anything which was previously in here
-    fn complete(&self, result: T) {
-        let mut fetch = self.lock().unwrap();
-        *fetch = RequestStatus::Completed(result);
-    }
-}
-
-type ArcFetchBlock = ArcStatus<EthBlock<TxHash>>;
-type ArcFetchReceipts = ArcStatus<Vec<TransactionReceipt>>;
-
-#[derive(Clone)]
-struct BlockRequest(u64, ArcFetchBlock);
-
-#[derive(Clone)]
-struct BlockReceiptsRequest(u64, ArcFetchReceipts);
-
-impl BlockRequest {
-    fn new(blocknum: u64) -> BlockRequest {
-        BlockRequest(blocknum, ArcStatus::default())
-    }
-}
-
-impl BlockReceiptsRequest {
-    fn new(blocknum: u64) -> BlockReceiptsRequest {
-        BlockReceiptsRequest(blocknum, ArcStatus::default())
-    }
-}
-
-#[derive(Clone)]
-enum NetworkRequest {
-    // wrapping b/c it is not possible to use an enum variant as a type...
-    Block(BlockRequest),
+enum Request {
+    Block(u64),
     BlockWithTxns(u64),
-    BlockReceipts(BlockReceiptsRequest),
+    BlockReceipts(u64),
 }
 
-impl NetworkRequest {
-    fn start(&self) -> Result<Progress, SimpleError> {
-        use NetworkRequest::*;
+impl Request {
+    fn start(&self) -> Response {
+        use Request::*;
         match self {
-            Block(BlockRequest(blocknum, arcfetch)) => {
-                arcfetch.start_if_waiting()?;
-                return Ok(Progress::BlockNoTx(*blocknum, RequestStatus::Started()));
-            }
-            BlockWithTxns(blocknum) => {
-                return Ok(Progress::BlockTx(*blocknum, RequestStatus::Started()));
-            }
-            BlockReceipts(BlockReceiptsRequest(blocknum, arcfetch)) => {
-                arcfetch.start_if_waiting()?;
-                return Ok(Progress::BlockReceipt(*blocknum, RequestStatus::Started()));
-            }
+            Block(blocknum) => Response::BlockNoTx(*blocknum, RequestStatus::Started()),
+            BlockWithTxns(blocknum) => Response::BlockTx(*blocknum, RequestStatus::Started()),
+            BlockReceipts(blocknum) => Response::BlockReceipt(*blocknum, RequestStatus::Started()),
         }
     }
 
     async fn fetch<T: JsonRpcClient>(
         &self,
         provider: &Provider<T>,
-    ) -> Result<Progress, Box<dyn Error>> {
-        use NetworkRequest::*;
+    ) -> Result<Response, Box<dyn Error>> {
+        use Request::*;
         match self {
-            Block(BlockRequest(blocknum, arcfetch)) => {
+            Block(blocknum) => {
                 let network_result = provider.get_block(*blocknum).await;
                 let block_opt = network_result?;
                 let block = block_opt.ok_or(SimpleError::new(format!(
@@ -122,13 +52,7 @@ impl NetworkRequest {
                     blocknum
                 )))?;
 
-                // TODO: ick
-                {
-                    let block_clone = block.clone();
-                    arcfetch.complete(block_clone);
-                }
-
-                return Ok(Progress::BlockNoTx(
+                return Ok(Response::BlockNoTx(
                     *blocknum,
                     RequestStatus::Completed(block),
                 ));
@@ -141,12 +65,12 @@ impl NetworkRequest {
                     blocknum
                 )))?;
 
-                return Ok(Progress::BlockTx(
+                return Ok(Response::BlockTx(
                     *blocknum,
                     RequestStatus::Completed(block),
                 ));
             }
-            BlockReceipts(BlockReceiptsRequest(blocknum, arcfetch)) => {
+            BlockReceipts(blocknum) => {
                 let network_result = provider.get_block_receipts(*blocknum).await;
                 let receipts: Vec<TransactionReceipt> = network_result?;
 
@@ -154,12 +78,7 @@ impl NetworkRequest {
                 // not unless we remember how many txns we expect to receive
                 // TODO(2021-09-14): add that memory to the fetch!
 
-                {
-                    let receipts_clone = receipts.clone();
-                    arcfetch.complete(receipts_clone);
-                }
-
-                return Ok(Progress::BlockReceipt(
+                return Ok(Response::BlockReceipt(
                     *blocknum,
                     RequestStatus::Completed(receipts),
                 ));
@@ -169,7 +88,7 @@ impl NetworkRequest {
 }
 
 #[derive(Debug)]
-pub enum Progress {
+pub enum Response {
     HighestBlockNumber(u64),
     NewBlock(EthBlock<TxHash>),
     BlockNoTx(u64, RequestStatus<EthBlock<TxHash>>),
@@ -178,15 +97,15 @@ pub enum Progress {
 }
 
 pub struct Database {
-    sled_tx: crossbeam::channel::Sender<NetworkRequest>,
-    pub results_rx: crossbeam::channel::Receiver<Progress>,
+    sled_tx: crossbeam::channel::Sender<Request>,
+    pub results_rx: crossbeam::channel::Receiver<Response>,
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, RequestStatus<EthBlock<Transaction>>>,
-    block_receipts: HashMap<u64, ArcFetchReceipts>,
+    block_receipts: HashMap<u64, RequestStatus<Vec<TransactionReceipt>>>,
     highest_block: Arc<Mutex<Option<u64>>>,
 
-    blocknum_to_block: HashMap<u64, ArcFetchBlock>,
+    blocknum_to_block: HashMap<u64, RequestStatus<EthBlock<TxHash>>>,
 }
 
 impl Database {
@@ -253,8 +172,8 @@ impl Database {
         }
     }
 
-    pub fn apply_progress(&mut self, progress: Progress) {
-        use Progress::*;
+    pub fn apply_progress(&mut self, progress: Response) {
+        use Response::*;
         match progress {
             HighestBlockNumber(_) => {
                 // TODO let's come back to this one
@@ -264,47 +183,19 @@ impl Database {
                 //       if appropriate
             }
             BlockNoTx(blocknum, status) => {
-                let arc = ArcStatus(Arc::new(Mutex::new(status)));
-                self.blocknum_to_block.insert(blocknum, arc);
+                self.blocknum_to_block.insert(blocknum, status);
             }
             BlockTx(blocknum, status) => {
                 self.blocks_to_txns.insert(blocknum, status);
             }
             BlockReceipt(blocknum, status) => {
-                let arc = ArcStatus(Arc::new(Mutex::new(status)));
-                self.block_receipts.insert(blocknum, arc);
+                self.block_receipts.insert(blocknum, status);
             }
         }
     }
 
-    fn fetch(&self, request: NetworkRequest) {
-        // TODO(2021-09-09): fetch() should return a Result
-        let cloned = request.clone();
-        self.sled_tx.send(cloned).unwrap();
-    }
-
     // TODO a macro is probably not the right solution here but this seems like a good
     //      spot to practice generating boilerplate with a macro
-
-    fn fetch_block(&self, block_number: u64) -> BlockRequest {
-        let new_request = BlockRequest::new(block_number);
-        let result = new_request.clone();
-
-        self.fetch(NetworkRequest::Block(new_request));
-        result
-    }
-
-    fn fetch_block_with_txns(&self, block_number: u64) {
-        self.fetch(NetworkRequest::BlockWithTxns(block_number));
-    }
-
-    fn fetch_block_receipts(&self, block_number: u64) -> BlockReceiptsRequest {
-        let new_request = BlockReceiptsRequest::new(block_number);
-        let result = new_request.clone();
-
-        self.fetch(NetworkRequest::BlockReceipts(new_request));
-        result
-    }
 
     // TODO: return result
     pub fn bump_highest_block(&self, blocknum: u64) {
@@ -328,19 +219,18 @@ impl Database {
         //TODO(2021-09-16) some version of entry().or_insert_with() should be able to
         //                 replace this but I haven't been able to convince the borrow
         //                 checker
-        let arcfetch = match self.blocknum_to_block.get(&blocknum) {
+        let result = match self.blocknum_to_block.get(&blocknum) {
             None => {
-                let new_fetch = self.fetch_block(blocknum);
-
+                self.sled_tx.send(Request::Block(blocknum)).unwrap();
                 debug!("fired new request for block {}", blocknum);
-                self.blocknum_to_block.insert(blocknum, new_fetch.1);
+                self.blocknum_to_block
+                    .insert(blocknum, RequestStatus::Waiting());
                 self.blocknum_to_block.get(&blocknum).unwrap()
             }
-            Some(arcfetch) => arcfetch,
+            Some(status) => status,
         };
 
-        let blockfetch = arcfetch.lock().unwrap();
-        blockfetch.clone()
+        result.clone()
     }
 
     pub fn get_block_with_transactions(
@@ -349,7 +239,7 @@ impl Database {
     ) -> RequestStatus<EthBlock<Transaction>> {
         let result = match self.blocks_to_txns.get(&blocknum) {
             None => {
-                self.fetch_block_with_txns(blocknum);
+                self.sled_tx.send(Request::BlockWithTxns(blocknum)).unwrap();
                 debug!("fired new request for txns for block {}", blocknum);
                 self.blocks_to_txns
                     .insert(blocknum, RequestStatus::Waiting());
@@ -364,20 +254,19 @@ impl Database {
 
     // TODO: this is a lot of copying, is that really okay?
     pub fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>> {
-        let arcfetch = match self.block_receipts.get(&blocknum) {
+        let result = match self.block_receipts.get(&blocknum) {
             None => {
-                let new_fetch = self.fetch_block_receipts(blocknum);
+                self.sled_tx.send(Request::BlockReceipts(blocknum)).unwrap();
 
                 debug!("fired new request for txns for block {}", blocknum);
-                self.block_receipts.insert(blocknum, new_fetch.1);
-
+                self.block_receipts
+                    .insert(blocknum, RequestStatus::Waiting());
                 self.block_receipts.get(&blocknum).unwrap()
             }
-            Some(arcfetch) => arcfetch,
+            Some(status) => status,
         };
 
-        let fetch = arcfetch.lock().unwrap();
-        fetch.clone()
+        result.clone()
     }
 
     /// this block is no longer valid, likely because a re-org happened, and should be
@@ -391,10 +280,10 @@ impl Database {
 
 fn run_sled(
     sled: sled::Db,
-    sled_rx: crossbeam::channel::Receiver<NetworkRequest>,
-    network_requests_tx: tokio_mpsc::UnboundedSender<NetworkRequest>,
-    network_results_rx: crossbeam::channel::Receiver<Progress>,
-    results_tx: crossbeam::channel::Sender<Progress>,
+    sled_rx: crossbeam::channel::Receiver<Request>,
+    network_requests_tx: tokio_mpsc::UnboundedSender<Request>,
+    network_results_rx: crossbeam::channel::Receiver<Response>,
+    results_tx: crossbeam::channel::Sender<Response>,
 ) {
     // loop through all incoming requests and try to satisfy them
     let blocks_tree = sled.open_tree(b"blocks").unwrap();
@@ -405,9 +294,9 @@ fn run_sled(
                 // commands
                 let msg = msg_result.unwrap();
 
-                use NetworkRequest::*;
+                use Request::*;
                 match msg {
-                    Block(BlockRequest(blocknum, ref arcfetch)) => {
+                    Block(blocknum) => {
                         // is it in our database?
                         let key: [u8; 8] = blocknum.to_be_bytes();
                         let opt = blocks_tree.get(key).unwrap();
@@ -415,9 +304,7 @@ fn run_sled(
                             None => {},
                             Some(ivec) => {
                                 let block: EthBlock<TxHash> = flexbuffers::from_slice(&ivec).unwrap();
-                                let clone = block.clone();
-                                arcfetch.complete(block);
-                                results_tx.send(Progress::BlockNoTx(blocknum, RequestStatus::Completed(clone))).unwrap();
+                                results_tx.send(Response::BlockNoTx(blocknum, RequestStatus::Completed(block))).unwrap();
                                 continue
                             }
                         }
@@ -434,7 +321,7 @@ fn run_sled(
             recv(network_results_rx) -> msg_result => {
                 // results
                 let msg = msg_result.unwrap();
-                use Progress::*;
+                use Response::*;
                 match msg {
                     BlockNoTx(blocknum, ref block_status) => {
                         use RequestStatus::*;
@@ -468,8 +355,8 @@ fn run_sled(
 async fn run_networking(
     provider: Provider<Ws>,
     highest_block: Arc<Mutex<Option<u64>>>,
-    request_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
-    result_tx: crossbeam::channel::Sender<Progress>,
+    request_rx: &mut tokio_mpsc::UnboundedReceiver<Request>,
+    result_tx: crossbeam::channel::Sender<Response>,
 ) {
     debug!("started networking thread");
     let block_number_opt = provider.get_block_number().await;
@@ -479,7 +366,7 @@ async fn run_networking(
             let mut block_number = highest_block.lock().unwrap();
             *block_number = Some(number.low_u64());
             result_tx
-                .send(Progress::HighestBlockNumber(number.low_u64()))
+                .send(Response::HighestBlockNumber(number.low_u64()))
                 .unwrap();
         }
     }
@@ -495,13 +382,13 @@ async fn run_networking(
 
 async fn loop_on_network_commands<T: JsonRpcClient>(
     provider: &Provider<T>,
-    result_tx: crossbeam::channel::Sender<Progress>,
-    network_rx: &mut tokio_mpsc::UnboundedReceiver<NetworkRequest>,
+    result_tx: crossbeam::channel::Sender<Response>,
+    network_rx: &mut tokio_mpsc::UnboundedReceiver<Request>,
 ) {
     loop {
         let request = network_rx.recv().await.unwrap(); // blocks until we have more input
 
-        let progress = request.start().unwrap();
+        let progress = request.start();
         result_tx.send(progress).unwrap();
 
         let result = request.fetch(&provider).await.unwrap();
@@ -511,11 +398,11 @@ async fn loop_on_network_commands<T: JsonRpcClient>(
 
 async fn watch_new_blocks(
     provider: &Provider<Ws>,
-    result_tx: crossbeam::channel::Sender<Progress>,
+    result_tx: crossbeam::channel::Sender<Response>,
 ) {
     let mut stream = provider.subscribe_blocks().await.unwrap();
     while let Some(block) = stream.next().await {
         debug!("new block {}", block.number.unwrap());
-        result_tx.send(Progress::NewBlock(block)).unwrap();
+        result_tx.send(Response::NewBlock(block)).unwrap();
     }
 }
