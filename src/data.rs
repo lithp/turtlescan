@@ -62,14 +62,10 @@ impl<T> ArcStatus<T> {
 }
 
 type ArcFetchBlock = ArcStatus<EthBlock<TxHash>>;
-type ArcFetchTxns = ArcStatus<EthBlock<Transaction>>;
 type ArcFetchReceipts = ArcStatus<Vec<TransactionReceipt>>;
 
 #[derive(Clone)]
 struct BlockRequest(u64, ArcFetchBlock);
-
-#[derive(Clone)]
-struct BlockTxnsRequest(u64, ArcFetchTxns);
 
 #[derive(Clone)]
 struct BlockReceiptsRequest(u64, ArcFetchReceipts);
@@ -77,12 +73,6 @@ struct BlockReceiptsRequest(u64, ArcFetchReceipts);
 impl BlockRequest {
     fn new(blocknum: u64) -> BlockRequest {
         BlockRequest(blocknum, ArcStatus::default())
-    }
-}
-
-impl BlockTxnsRequest {
-    fn new(blocknum: u64) -> BlockTxnsRequest {
-        BlockTxnsRequest(blocknum, ArcStatus::default())
     }
 }
 
@@ -96,7 +86,7 @@ impl BlockReceiptsRequest {
 enum NetworkRequest {
     // wrapping b/c it is not possible to use an enum variant as a type...
     Block(BlockRequest),
-    BlockWithTxns(BlockTxnsRequest),
+    BlockWithTxns(u64),
     BlockReceipts(BlockReceiptsRequest),
 }
 
@@ -108,8 +98,7 @@ impl NetworkRequest {
                 arcfetch.start_if_waiting()?;
                 return Ok(Progress::BlockNoTx(*blocknum, RequestStatus::Started()));
             }
-            BlockWithTxns(BlockTxnsRequest(blocknum, arcfetch)) => {
-                arcfetch.start_if_waiting()?;
+            BlockWithTxns(blocknum) => {
                 return Ok(Progress::BlockTx(*blocknum, RequestStatus::Started()));
             }
             BlockReceipts(BlockReceiptsRequest(blocknum, arcfetch)) => {
@@ -144,18 +133,13 @@ impl NetworkRequest {
                     RequestStatus::Completed(block),
                 ));
             }
-            BlockWithTxns(BlockTxnsRequest(blocknum, arcfetch)) => {
+            BlockWithTxns(blocknum) => {
                 let network_result = provider.get_block_with_txs(*blocknum).await;
                 let block_opt = network_result?;
                 let block = block_opt.ok_or(SimpleError::new(format!(
                     "no such block blocknum={}",
                     blocknum
                 )))?;
-
-                {
-                    let block_clone = block.clone();
-                    arcfetch.complete(block_clone);
-                }
 
                 return Ok(Progress::BlockTx(
                     *blocknum,
@@ -198,7 +182,7 @@ pub struct Database {
     pub results_rx: crossbeam::channel::Receiver<Progress>,
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
-    blocks_to_txns: HashMap<u64, ArcFetchTxns>,
+    blocks_to_txns: HashMap<u64, RequestStatus<EthBlock<Transaction>>>,
     block_receipts: HashMap<u64, ArcFetchReceipts>,
     highest_block: Arc<Mutex<Option<u64>>>,
 
@@ -284,8 +268,7 @@ impl Database {
                 self.blocknum_to_block.insert(blocknum, arc);
             }
             BlockTx(blocknum, status) => {
-                let arc = ArcStatus(Arc::new(Mutex::new(status)));
-                self.blocks_to_txns.insert(blocknum, arc);
+                self.blocks_to_txns.insert(blocknum, status);
             }
             BlockReceipt(blocknum, status) => {
                 let arc = ArcStatus(Arc::new(Mutex::new(status)));
@@ -311,12 +294,8 @@ impl Database {
         result
     }
 
-    fn fetch_block_with_txns(&self, block_number: u64) -> BlockTxnsRequest {
-        let new_request = BlockTxnsRequest::new(block_number);
-        let result = new_request.clone();
-
-        self.fetch(NetworkRequest::BlockWithTxns(new_request));
-        result
+    fn fetch_block_with_txns(&self, block_number: u64) {
+        self.fetch(NetworkRequest::BlockWithTxns(block_number));
     }
 
     fn fetch_block_receipts(&self, block_number: u64) -> BlockReceiptsRequest {
@@ -368,20 +347,19 @@ impl Database {
         &mut self,
         blocknum: u64,
     ) -> RequestStatus<EthBlock<Transaction>> {
-        let arcfetch = match self.blocks_to_txns.get(&blocknum) {
+        let result = match self.blocks_to_txns.get(&blocknum) {
             None => {
-                let new_fetch = self.fetch_block_with_txns(blocknum);
-
+                self.fetch_block_with_txns(blocknum);
                 debug!("fired new request for txns for block {}", blocknum);
-                self.blocks_to_txns.insert(blocknum, new_fetch.1);
-
+                self.blocks_to_txns
+                    .insert(blocknum, RequestStatus::Waiting());
                 self.blocks_to_txns.get(&blocknum).unwrap()
             }
-            Some(arcfetch) => arcfetch,
+            Some(status) => status,
         };
 
-        let blockfetch = arcfetch.lock().unwrap();
-        blockfetch.clone()
+        // TODO I don't think this clone is necessary
+        result.clone()
     }
 
     // TODO: this is a lot of copying, is that really okay?

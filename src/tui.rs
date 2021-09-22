@@ -1497,7 +1497,6 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
             },
             UIMessage::Refresh() => {}
             UIMessage::Progress(progress) => {
-                debug!(" ui progress: {:?}", progress);
                 tui.apply_progress(progress);
             }
         };
