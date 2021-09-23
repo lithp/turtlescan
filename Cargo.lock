@@ -442,6 +442,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethers-contract"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f22e4af812da76ff1e64ffd0a18af6ef7d150bc11bc605f080568d509bb86456"
+dependencies = [
+ "ethers-core",
+ "ethers-providers",
+ "futures-util",
+ "hex",
+ "once_cell",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ethers-core"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2045,10 +2062,12 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam",
+ "ethers-contract",
  "ethers-core",
  "ethers-providers",
  "flexbuffers",
  "futures",
+ "hex",
  "log",
  "log4rs",
  "serde",

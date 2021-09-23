@@ -7,17 +7,23 @@ mod util;
 
 use ansi_term::Style as AnsiStyle;
 use clap::{App, Arg, SubCommand};
+use ethers_core::abi::AbiParser;
+use ethers_core::abi::FunctionExt;
+use ethers_core::types::Bytes;
+use ethers_core::types::NameOrAddress;
+use ethers_core::types::TransactionRequest;
+use ethers_core::types::H160;
+use ethers_core::types::U256;
 use ethers_providers::{Http, JsonRpcClient, Middleware, Provider, Ws};
+use log::debug;
+use log4rs;
 use serde_json;
+use simple_error::bail;
 use std::convert::TryFrom;
 use std::env;
 use std::error::Error;
 use std::path;
-
-use log::debug;
-use log4rs;
-
-use simple_error::bail;
+use std::str::FromStr;
 use xdg;
 
 // https://mainnet.infura.io/v3/PROJECT_ID
@@ -58,6 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .subcommand(SubCommand::with_name("getBlock").about("emits the current block (json)"))
         .subcommand(SubCommand::with_name("tui").about("starts a tui (experimental)"))
         .subcommand(SubCommand::with_name("tailBlocks").about("emits blocks as they are received"))
+        .subcommand(SubCommand::with_name("egl").about("returns the current EGL gas target"))
         .get_matches();
 
     let provider_url: String = {
@@ -85,6 +92,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match typed_provider {
                 TypedProvider::Ws(provider) => get_block(provider).await,
                 TypedProvider::Http(provider) => get_block(provider).await,
+            }
+        }
+        Some("egl") => {
+            let typed_provider = new_provider(provider_url).await?;
+
+            match typed_provider {
+                TypedProvider::Ws(provider) => egl(provider).await,
+                TypedProvider::Http(provider) => egl(provider).await,
             }
         }
         Some("tailBlocks") => {
@@ -126,4 +141,50 @@ async fn get_block<T: JsonRpcClient>(provider: Provider<T>) -> Result<(), Box<dy
     println!("{}", serde_json::to_string_pretty(&block).unwrap());
 
     Ok(())
+}
+
+async fn egl<T: JsonRpcClient>(provider: Provider<T>) -> Result<(), Box<dyn Error>> {
+    // let egl_erc20 = "1e83916ea2ef2d7a6064775662e163b2d4c330a7";
+    // let sig = "function totalSupply() returns (int256)";
+    //
+    // this is the proxy contract
+    let egl_vote = "e9a09e0032d1ab5ce4bf09149ef746258252bd0b";
+    let addr = H160::from_str(egl_vote)?;
+
+    let sig = "function desiredEgl() view returns (int256)";
+    let func = AbiParser::default().parse_function(sig)?;
+    let data = ethers_contract::encode_function_data(&func, ())?;
+
+    {
+        let selector: [u8; 4] = func.selector();
+        debug!(
+            "calling function selector={} sig={:?}",
+            hex::encode(selector),
+            func
+        );
+    }
+
+    let output = query_chain(&provider, addr, data).await?;
+    let gas_target: U256 = ethers_contract::decode_function_data(&func, output, false)?;
+    println!("gas_target: {:?}", gas_target);
+    Ok(())
+}
+
+async fn query_chain<T: JsonRpcClient>(
+    provider: &Provider<T>,
+    address: H160,
+    data: Bytes,
+) -> Result<Bytes, Box<dyn Error>> {
+    let tx = /*Eip1559*/TransactionRequest {
+        to: Some(NameOrAddress::Address(address)),
+        data: Some(data),
+        // TODO: how do you pick a sensible gas price?
+        gas_price: Some(U256::from_str_radix("290F915100", 16)?),
+        ..Default::default()
+    };
+
+    let result = provider.trace_call(tx, vec![], None).await;
+    let trace = result?;
+
+    return Ok(trace.output);
 }
