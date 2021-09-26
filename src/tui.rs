@@ -424,7 +424,7 @@ enum FocusedPane {
 
 const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
 
-struct TUI<'a> {
+struct TUI<'a, T: data::Data> {
     /* UI state */
     block_list_height: Option<usize>,
     block_list_top_block: Option<u64>,
@@ -447,7 +447,7 @@ struct TUI<'a> {
     columns: Vec<Column<EthBlock<TxHash>>>,
     column_items_len: usize,
 
-    database: &'a mut data::Database,
+    database: &'a mut T,
 }
 
 fn list_state_with_selection(selection: Option<usize>) -> ListState {
@@ -495,8 +495,36 @@ fn scroll_down_one(state: &mut ListState, item_count: usize) {
     */
 }
 
-impl<'a> TUI<'a> {
-    fn new(database: &'a mut data::Database) -> TUI<'a> {
+fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -> (u64, u64) {
+    // if you have a list of height 1 the top block and bottom block are the same
+    let height_offset = height.saturating_sub(1);
+
+    match selected_block {
+        None => {
+            let bottom_block = top_block.saturating_sub(height_offset);
+            return (bottom_block, top_block);
+        }
+        Some(selection) => {
+            if selection > top_block {
+                // we need to scroll up
+                let bottom_block = selection.saturating_sub(height_offset);
+                return (bottom_block, selection);
+            }
+
+            let bottom_block = top_block.saturating_sub(height_offset);
+            if selection < bottom_block {
+                // we need to scroll down
+                let top_block = selection + height_offset;
+                return (selection, top_block);
+            }
+
+            return (bottom_block, top_block);
+        }
+    }
+}
+
+impl<'a, T: data::Data> TUI<'a, T> {
+    fn new(database: &'a mut T) -> TUI<'a, T> {
         let txn_columns = default_txn_columns();
         let txn_column_len = txn_columns.len();
 
@@ -579,6 +607,7 @@ impl<'a> TUI<'a> {
             BlocksTransactions(1) => match self.txn_list_state.selected() {
                 None => {}
                 Some(_) => {
+                    // check that there exist any transactions
                     self.pane_state = BlocksTransactionsTransaction(2);
                 }
             },
@@ -1071,34 +1100,6 @@ impl<'a> TUI<'a> {
         frame.render_widget(widget, area);
     }
 
-    fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -> (u64, u64) {
-        // if you have a list of height 1 the top block and bottom block are the same
-        let height_offset = height.saturating_sub(1);
-
-        match selected_block {
-            None => {
-                let bottom_block = top_block.saturating_sub(height_offset);
-                return (bottom_block, top_block);
-            }
-            Some(selection) => {
-                if selection > top_block {
-                    // we need to scroll up
-                    let bottom_block = selection.saturating_sub(height_offset);
-                    return (bottom_block, selection);
-                }
-
-                let bottom_block = top_block.saturating_sub(height_offset);
-                if selection < bottom_block {
-                    // we need to scroll down
-                    let top_block = selection + height_offset;
-                    return (selection, top_block);
-                }
-
-                return (bottom_block, top_block);
-            }
-        }
-    }
-
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
         assert!(!self.database.get_highest_block().is_none());
         assert!(!self.block_list_top_block.is_none());
@@ -1113,7 +1114,7 @@ impl<'a> TUI<'a> {
         }
 
         let target_height = target_height as u64;
-        let (bottom_block, top_block) = TUI::block_list_bounds(
+        let (bottom_block, top_block) = block_list_bounds(
             target_height,
             self.block_list_top_block.unwrap(),
             self.block_list_selected_block,

@@ -97,6 +97,19 @@ impl Request {
     }
 }
 
+pub trait Data {
+    fn apply_progress(&mut self, progress: Response);
+    fn bump_highest_block(&self, blocnum: u64);
+    fn get_highest_block(&self) -> Option<u64>;
+    fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>>;
+    fn get_block_with_transactions(
+        &mut self,
+        blocknum: u64,
+    ) -> RequestStatus<EthBlock<Transaction>>;
+    fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>>;
+    fn invalidate_block(&mut self, blocknum: u64);
+}
+
 pub struct Database {
     sled_tx: crossbeam::channel::Sender<Request>,
     pub results_rx: crossbeam::channel::Receiver<Response>,
@@ -172,8 +185,10 @@ impl Database {
             blocknum_to_block: HashMap::new(),
         }
     }
+}
 
-    pub fn apply_progress(&mut self, progress: Response) {
+impl Data for Database {
+    fn apply_progress(&mut self, progress: Response) {
         use Response::*;
         match progress {
             HighestBlockNumber(_) => {
@@ -196,7 +211,7 @@ impl Database {
     }
 
     // TODO: return result
-    pub fn bump_highest_block(&self, blocknum: u64) {
+    fn bump_highest_block(&self, blocknum: u64) {
         let mut highest_block_opt = self.highest_block.lock().unwrap();
 
         if let Some(highest_block_number) = *highest_block_opt {
@@ -208,12 +223,12 @@ impl Database {
         *highest_block_opt = Some(blocknum);
     }
 
-    pub fn get_highest_block(&self) -> Option<u64> {
+    fn get_highest_block(&self) -> Option<u64> {
         let highest_block_opt = self.highest_block.lock().unwrap();
         highest_block_opt.clone()
     }
 
-    pub fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>> {
+    fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>> {
         //TODO(2021-09-16) some version of entry().or_insert_with() should be able to
         //                 replace this but I haven't been able to convince the borrow
         //                 checker
@@ -231,7 +246,7 @@ impl Database {
         result.clone()
     }
 
-    pub fn get_block_with_transactions(
+    fn get_block_with_transactions(
         &mut self,
         blocknum: u64,
     ) -> RequestStatus<EthBlock<Transaction>> {
@@ -251,7 +266,7 @@ impl Database {
     }
 
     // TODO: this is a lot of copying, is that really okay?
-    pub fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>> {
+    fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>> {
         let result = match self.block_receipts.get(&blocknum) {
             None => {
                 self.sled_tx.send(Request::BlockReceipts(blocknum)).unwrap();
@@ -269,7 +284,7 @@ impl Database {
 
     /// this block is no longer valid, likely because a re-org happened, and should be
     /// re-fetched if we ever ask for it again
-    pub fn invalidate_block(&mut self, blocknum: u64) {
+    fn invalidate_block(&mut self, blocknum: u64) {
         self.blocknum_to_block.remove(&blocknum);
         self.block_receipts.remove(&blocknum);
         self.blocks_to_txns.remove(&blocknum);
