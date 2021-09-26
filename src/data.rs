@@ -99,7 +99,7 @@ impl Request {
 
 pub trait Data {
     fn apply_progress(&mut self, progress: Response);
-    fn bump_highest_block(&self, blocnum: u64);
+    fn bump_highest_block(&self, blocknum: u64);
     fn get_highest_block(&self) -> Option<u64>;
     fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>>;
     fn get_block_with_transactions(

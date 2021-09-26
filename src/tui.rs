@@ -424,7 +424,7 @@ enum FocusedPane {
 
 const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
 
-struct TUI<'a, T: data::Data> {
+pub struct TUI<'a, T: data::Data> {
     /* UI state */
     block_list_height: Option<usize>,
     block_list_top_block: Option<u64>,
@@ -524,7 +524,7 @@ fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -
 }
 
 impl<'a, T: data::Data> TUI<'a, T> {
-    fn new(database: &'a mut T) -> TUI<'a, T> {
+    pub fn new(database: &'a mut T) -> TUI<'a, T> {
         let txn_columns = default_txn_columns();
         let txn_column_len = txn_columns.len();
 
