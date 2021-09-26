@@ -663,9 +663,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         let selection = self.block_list_selected_block.unwrap();
         let new_selection = selection + height;
         let new_selection = cmp::min(highest, new_selection);
-        self.block_list_selected_block = Some(new_selection);
-        self.txn_list_state.select(None);
-        // no need to adjust the top_block, draw() will do that for us
+        self.select_block(Some(new_selection));
     }
 
     fn scroll_txn_list_up_one_page(&mut self) {
@@ -673,6 +671,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
             return;
         }
         let height = self.block_list_height.unwrap();
+
+        if !self.selected_block_has_transactions() {
+            return;
+        }
 
         match self.txn_list_state.selected() {
             None => {}
@@ -689,11 +691,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         }
         let height = self.block_list_height.unwrap();
 
-        if let None = self.txn_list_length {
-            return;
-        }
-        let length = self.txn_list_length.unwrap();
-        if length == 0 {
+        if !self.selected_block_has_transactions() {
             return;
         }
 
@@ -706,6 +704,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
                 // implementation and modify it to allow tweaking offset
             }
             Some(selection) => {
+                let length = self.txn_list_length.unwrap();
                 let candidate_selection = selection + height;
                 let selection = cmp::min(candidate_selection, length - 1);
                 self.txn_list_state.select(Some(selection));
@@ -748,9 +747,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
 
         let selection = self.block_list_selected_block.unwrap();
         let new_selection = selection.saturating_sub(height);
-        self.block_list_selected_block = Some(new_selection);
-        self.txn_list_state.select(None);
-        // no need to adjust the top_block, draw() will do that for us
+        self.select_block(Some(new_selection));
     }
 
     fn handle_scroll_to_top(&mut self) {
@@ -762,7 +759,11 @@ impl<'a, T: data::Data> TUI<'a, T> {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_top(),
             FocusedPane::Transactions => {
-                self.txn_list_state.select(Some(0));
+                if self.selected_block_has_transactions() {
+                    self.txn_list_state.select(Some(0));
+                } else {
+                    assert!(self.txn_list_state.selected().is_none());
+                }
             }
             FocusedPane::Transaction => {}
         };
@@ -779,9 +780,12 @@ impl<'a, T: data::Data> TUI<'a, T> {
         match self.pane_state.focus() {
             FocusedPane::Blocks => self.scroll_block_list_to_bottom(),
             FocusedPane::Transactions => {
-                if let Some(length) = self.txn_list_length {
+                if self.selected_block_has_transactions() {
+                    let length = self.txn_list_length.unwrap();
                     self.txn_list_state.select(Some(length.saturating_sub(1)))
-                };
+                } else {
+                    assert!(self.txn_list_state.selected().is_none());
+                }
             }
             FocusedPane::Transaction => {}
         };
@@ -789,14 +793,12 @@ impl<'a, T: data::Data> TUI<'a, T> {
 
     fn scroll_block_list_to_top(&mut self) {
         if let Some(highest) = self.database.get_highest_block() {
-            self.block_list_selected_block = Some(highest);
-            self.txn_list_state.select(None);
+            self.select_block(Some(highest));
         }
     }
 
     fn scroll_block_list_to_bottom(&mut self) {
-        self.block_list_selected_block = Some(0);
-        self.txn_list_state.select(None);
+        self.select_block(Some(0));
     }
 
     fn handle_key_up(&mut self) {
@@ -808,16 +810,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         Some(selection) => {
                             if let Some(highest) = self.database.get_highest_block() {
                                 let new_selection = cmp::min(highest, selection + 1);
-                                self.block_list_selected_block = Some(new_selection);
-                                self.txn_list_state.select(None);
+                                self.select_block(Some(new_selection));
                             }
                         }
                     };
-
-                    // it doesn't make sense to persist this if we're looking at
-                    // txns for a new block. In the far future maybe this should
-                    // track per-block scroll state?
-                    self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -841,24 +837,12 @@ impl<'a, T: data::Data> TUI<'a, T> {
             false => match self.pane_state.focus() {
                 FocusedPane::Blocks => {
                     match self.block_list_selected_block {
-                        None => self.block_list_selected_block = self.block_list_top_block,
+                        None => self.select_block(self.block_list_top_block),
                         Some(selected_block) => {
-                            if selected_block == 0 {
-                                // do not change the selection do not clear txn_list_state
-                                return;
-                            }
-
-                            self.block_list_selected_block = Some(selected_block - 1);
-                            self.txn_list_state.select(None);
+                            let new_selection = selected_block.saturating_sub(1);
+                            self.select_block(Some(new_selection));
                         }
                     };
-
-                    // it doesn't make sense to persist this if we're looking at txns
-                    // for a new block.
-                    // TODO(bug): technically we should not throw away the state if the
-                    // selection did not change, such as if there is only one block in
-                    // the list
-                    self.txn_list_state.select(None);
                 }
                 FocusedPane::Transactions => {
                     let item_count = self.txn_list_length.unwrap_or(0);
@@ -1226,7 +1210,9 @@ impl<'a, T: data::Data> TUI<'a, T> {
                     )))]
                 }
                 Completed(block) => {
-                    if let None = self.txn_list_state.selected() {
+                    let has_transactions = block.transactions.len() > 0;
+                    let nothing_selected = self.txn_list_state.selected().is_none();
+                    if nothing_selected && has_transactions {
                         self.txn_list_state.select(Some(0));
                     }
 
@@ -1400,6 +1386,28 @@ impl<'a, T: data::Data> TUI<'a, T> {
         let block_width = cmp::max(remaining_width, blocks_min_width);
         let txn_width = available_width.saturating_sub(block_width);
         return (block_width, txn_width);
+    }
+
+    fn select_block(&mut self, opt_blocknum: Option<u64>) {
+        let selection_changed = opt_blocknum != self.block_list_selected_block;
+        self.block_list_selected_block = opt_blocknum;
+
+        // there's no need to change the scroll here (to adjust top_block), draw() will do
+        // that for us
+
+        if selection_changed {
+            // it doesn't make sense to persist this if we're looking at
+            // txns for a new block. In the far future maybe this should
+            // track per-block scroll state?
+            self.txn_list_state.select(None);
+        }
+    }
+
+    fn selected_block_has_transactions(&self) -> bool {
+        if let Some(length) = self.txn_list_length {
+            return length > 0;
+        }
+        return false;
     }
 }
 

@@ -117,8 +117,23 @@ fn _save_buffer(ui: &mut tui::TUI<FakeDB>, dest: &str, width: u16, height: u16) 
 
 #[test]
 fn no_crash_when_block_has_no_txns() {
-    let mut database = FakeDB {};
+    let mut database = FakeDB {}; // TODO: to make this test more robust explicitly start
+                                  //       at block 3
     let mut ui = tui::TUI::new(&mut database);
+
+    /*
+     * TODO(2021-09-26): This test is not very robust at all. It performs a sequence of
+     *                   actions and asserts that they don't lead us into a crash (and
+     *                   emulates what a fuzz tester would have produced) but if the app
+     *                   changes then this sequence of actions will not necessarily get
+     *                   us back into the desired dangerous state. It is better to
+     *                   explicitly start a TUI into the BlockTransactions(1) state and
+     *                   from there try to handle_key_right() and draw().
+     *
+     *                   This might even deserve to be factored into a few unit tests.
+     *                   The transaction details pane should not crash when the desired
+     *                   txn offset does not exist, and it should emit a log message.
+     */
 
     // if we do not do a draw then block_list_top_block will never be set
     draw(&mut ui, 90, 10);
