@@ -4,7 +4,7 @@ use crate::util;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, U64};
 use ethers_providers::{Provider, Ws};
-use log::debug;
+use log::{debug, warn};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use std::cmp;
@@ -590,7 +590,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         };
     }
 
-    fn handle_key_right(&mut self) {
+    pub fn handle_key_right(&mut self) {
         // we're going to move the focus, if a pane exists, and create it if it does not
         use PaneState::*;
 
@@ -832,7 +832,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         };
     }
 
-    fn handle_key_down(&mut self) {
+    pub fn handle_key_down(&mut self) {
         match self.configuring_columns {
             true => {
                 let col_count = self.column_count();
@@ -986,7 +986,8 @@ impl<'a, T: data::Data> TUI<'a, T> {
             Waiting() | Started() => return None,
             Completed(block) => {
                 if offset >= block.transactions.len() {
-                    panic!("inconsistent state");
+                    warn!("offset should have been reset");
+                    return None;
                 }
 
                 return Some(block.transactions[offset].clone());
@@ -1272,7 +1273,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         frame.render_stateful_widget(txn_list, area, &mut self.txn_list_state);
     }
 
-    fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
+    pub fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let waiting_for_initial_block = self.database.get_highest_block().is_none();
         if waiting_for_initial_block {
             frame.render_widget(

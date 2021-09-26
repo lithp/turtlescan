@@ -45,6 +45,11 @@ pub fn humanize_u256(number: U256) -> String {
         return format!("{} Gwei", number);
     }
 
+    let number = number.div(1000);
+    if number < U256::from(1000) {
+        return format!("{} Twei", number);
+    }
+
     panic!("number too large to format");
 }
 

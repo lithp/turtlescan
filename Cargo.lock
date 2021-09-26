@@ -2079,6 +2079,7 @@ dependencies = [
  "termion",
  "tokio",
  "tui",
+ "unicode-width",
  "xdg",
 ]
 
