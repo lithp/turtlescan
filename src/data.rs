@@ -27,6 +27,7 @@ enum Request {
     Block(u64),
     BlockWithTxns(u64),
     BlockReceipts(u64),
+    TxnReceipt(TxHash),
 }
 
 #[derive(Debug)]
@@ -36,6 +37,7 @@ pub enum Response {
     BlockNoTx(u64, RequestStatus<EthBlock<TxHash>>),
     BlockTx(u64, RequestStatus<EthBlock<Transaction>>),
     BlockReceipt(u64, RequestStatus<Vec<TransactionReceipt>>),
+    TxnReceipt(TxHash, RequestStatus<TransactionReceipt>),
 }
 
 impl Request {
@@ -45,6 +47,7 @@ impl Request {
             Block(blocknum) => Response::BlockNoTx(*blocknum, RequestStatus::Started()),
             BlockWithTxns(blocknum) => Response::BlockTx(*blocknum, RequestStatus::Started()),
             BlockReceipts(blocknum) => Response::BlockReceipt(*blocknum, RequestStatus::Started()),
+            TxnReceipt(txhash) => Response::TxnReceipt(*txhash, RequestStatus::Started()),
         }
     }
 
@@ -81,6 +84,8 @@ impl Request {
                 ));
             }
             BlockReceipts(blocknum) => {
+                // careful, this might return:
+                // JsonRpcClientError(JsonRpcError(JsonRpcError { code: -32601, message: "Method not found", data: None }))
                 let network_result = provider.get_block_receipts(*blocknum).await;
                 let receipts: Vec<TransactionReceipt> = network_result?;
 
@@ -93,9 +98,25 @@ impl Request {
                     RequestStatus::Completed(receipts),
                 ));
             }
+            TxnReceipt(txhash) => {
+                let network_result = provider.get_transaction_receipt(*txhash).await;
+                let opt_receipt = network_result?;
+
+                // None if this txhash does not exist
+                // TODO: handle this error!
+                let receipt: TransactionReceipt = opt_receipt.unwrap();
+
+                return Ok(Response::TxnReceipt(
+                    *txhash,
+                    RequestStatus::Completed(receipt),
+                ));
+            }
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct InvalidIndex;
 
 pub trait Data {
     fn apply_progress(&mut self, progress: Response);
@@ -107,7 +128,28 @@ pub trait Data {
         blocknum: u64,
     ) -> RequestStatus<EthBlock<Transaction>>;
     fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>>;
+    fn get_transaction_receipt<T: Into<TxHash>>(
+        &mut self,
+        transaction: T,
+    ) -> RequestStatus<TransactionReceipt>;
     fn invalidate_block(&mut self, blocknum: u64);
+
+    fn get_block_receipt(
+        &mut self,
+        blocknum: u64,
+        offset: usize,
+    ) -> Result<RequestStatus<TransactionReceipt>, InvalidIndex> {
+        if let RequestStatus::Completed(block) = self.get_block(blocknum) {
+            if offset >= block.transactions.len() {
+                Err(InvalidIndex)
+            } else {
+                let txhash = block.transactions[offset];
+                Ok(self.get_transaction_receipt(txhash))
+            }
+        } else {
+            Ok(RequestStatus::Waiting())
+        }
+    }
 }
 
 pub struct Database {
@@ -116,8 +158,11 @@ pub struct Database {
 
     // TODO(2021-09-10) currently these leak memory, use an lru cache or something
     blocks_to_txns: HashMap<u64, RequestStatus<EthBlock<Transaction>>>,
-    block_receipts: HashMap<u64, RequestStatus<Vec<TransactionReceipt>>>,
     highest_block: Arc<Mutex<Option<u64>>>,
+    transaction_receipts: HashMap<TxHash, RequestStatus<TransactionReceipt>>,
+
+    // currently unused
+    block_receipts: HashMap<u64, RequestStatus<Vec<TransactionReceipt>>>,
 
     blocknum_to_block: HashMap<u64, RequestStatus<EthBlock<TxHash>>>,
 }
@@ -183,6 +228,7 @@ impl Database {
             blocks_to_txns: HashMap::new(),
             block_receipts: HashMap::new(),
             blocknum_to_block: HashMap::new(),
+            transaction_receipts: HashMap::new(),
         }
     }
 }
@@ -206,6 +252,9 @@ impl Data for Database {
             }
             BlockReceipt(blocknum, status) => {
                 self.block_receipts.insert(blocknum, status);
+            }
+            TxnReceipt(txhash, status) => {
+                self.transaction_receipts.insert(txhash, status);
             }
         }
     }
@@ -235,7 +284,6 @@ impl Data for Database {
         let result = match self.blocknum_to_block.get(&blocknum) {
             None => {
                 self.sled_tx.send(Request::Block(blocknum)).unwrap();
-                debug!("fired new request for block {}", blocknum);
                 self.blocknum_to_block
                     .insert(blocknum, RequestStatus::Waiting());
                 self.blocknum_to_block.get(&blocknum).unwrap()
@@ -253,7 +301,6 @@ impl Data for Database {
         let result = match self.blocks_to_txns.get(&blocknum) {
             None => {
                 self.sled_tx.send(Request::BlockWithTxns(blocknum)).unwrap();
-                debug!("fired new request for txns for block {}", blocknum);
                 self.blocks_to_txns
                     .insert(blocknum, RequestStatus::Waiting());
                 self.blocks_to_txns.get(&blocknum).unwrap()
@@ -265,16 +312,31 @@ impl Data for Database {
         result.clone()
     }
 
-    // TODO: this is a lot of copying, is that really okay?
     fn get_block_receipts(&mut self, blocknum: u64) -> RequestStatus<Vec<TransactionReceipt>> {
         let result = match self.block_receipts.get(&blocknum) {
             None => {
                 self.sled_tx.send(Request::BlockReceipts(blocknum)).unwrap();
-
-                debug!("fired new request for txns for block {}", blocknum);
                 self.block_receipts
                     .insert(blocknum, RequestStatus::Waiting());
                 self.block_receipts.get(&blocknum).unwrap()
+            }
+            Some(status) => status,
+        };
+
+        result.clone()
+    }
+
+    fn get_transaction_receipt<T: Into<TxHash>>(
+        &mut self,
+        transaction: T,
+    ) -> RequestStatus<TransactionReceipt> {
+        let txhash: TxHash = transaction.into();
+        let result = match self.transaction_receipts.get(&txhash) {
+            None => {
+                self.sled_tx.send(Request::TxnReceipt(txhash)).unwrap();
+                self.transaction_receipts
+                    .insert(txhash, RequestStatus::Waiting());
+                self.transaction_receipts.get(&txhash).unwrap()
             }
             Some(status) => status,
         };
@@ -351,6 +413,9 @@ fn run_sled(
                             }
                         }
                     },
+                    TxnReceipt(_txhash) => {
+                        // for now do not save responses to sled
+                    }
                 }
 
                 if let Err(_) = network_requests_tx.send(msg) {
@@ -411,6 +476,7 @@ fn run_sled(
                             }
                         };
                     }
+                    TxnReceipt(_, _) => {}
                     HighestBlockNumber(_) => {}
                     NewBlock(_) => {}
                 }

@@ -11,7 +11,6 @@ use std::cmp;
 use std::convert::TryInto;
 use std::error::Error;
 use std::io;
-use std::iter;
 use std::path;
 use std::thread;
 use std::time::Instant;
@@ -289,17 +288,13 @@ fn block_to_txn_list_items(
     txn_columns: &Vec<Column<Transaction>>,
     receipt_columns: &Vec<Column<TransactionReceipt>>,
     block: &EthBlock<Transaction>,
-    receipts: Option<&Vec<TransactionReceipt>>,
+    receipts: &Vec<data::RequestStatus<TransactionReceipt>>,
 ) -> Vec<ListItem<'static>> {
     if block.transactions.len() == 0 {
         return vec![ListItem::new(Span::raw("this block has no transactions"))];
     }
 
-    if let Some(ref receipts) = receipts {
-        if block.transactions.len() != receipts.len() {
-            panic!("uh on"); // TODO: return a real error
-        }
-    }
+    assert!(block.transactions.len() == receipts.len());
 
     let txn_spans: Vec<Span> = block
         .transactions
@@ -310,19 +305,17 @@ fn block_to_txn_list_items(
         })
         .collect();
 
-    let receipt_spans: Vec<Span> = match receipts {
-        Some(receipts) => receipts
-            .iter()
-            .map(|receipt| {
+    use data::RequestStatus::*;
+    let receipt_spans: Vec<Span> = receipts
+        .iter()
+        .map(|status| match status {
+            Waiting() | Started() => Span::raw("fetching"),
+            Completed(receipt) => {
                 let formatted = render_item_with_cols(receipt_columns, receipt);
                 Span::raw(formatted)
-            })
-            .collect(),
-        None => iter::repeat("".to_string())
-            .map(|empty| Span::raw(empty))
-            .take(block.transactions.len())
-            .collect(),
-    };
+            }
+        })
+        .collect();
 
     txn_spans
         .into_iter()
@@ -987,16 +980,16 @@ impl<'a, T: data::Data> TUI<'a, T> {
         let (block, offset) = selection.unwrap();
 
         use data::RequestStatus::*;
-        let fetch = self.database.get_block_receipts(block);
+        // let fetch = self.database.get_block_receipts(block);
+        let fetch = self
+            .database
+            .get_block_receipt(block, offset)
+            .expect("inconsistent state");
         match fetch {
             Waiting() | Started() => return None,
-            Completed(receipts) => {
-                if offset >= receipts.len() {
-                    panic!("inconsistent state");
-                }
-
+            Completed(receipt) => {
                 // TODO: the value was already cloned by get_block_receipts...
-                return Some(receipts[offset].clone());
+                return Some(receipt.clone());
             }
         }
     }
@@ -1161,7 +1154,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
     fn txn_list_title(&mut self) -> &'static str {
         const READY: &str = "Transactions";
         const FETCHING_TXNS: &str = "Transactions (fetching)";
-        const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
+        // const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
 
         let block = self.block_list_selected_block;
         if let None = block {
@@ -1176,11 +1169,15 @@ impl<'a, T: data::Data> TUI<'a, T> {
             Completed(_) => (),
         }
 
+        return READY;
+
+        /*
         let receiptsfetch = self.database.get_block_receipts(block);
         match receiptsfetch {
             Waiting() | Started() => return FETCHING_RECEIPTS,
             Completed(_) => return READY,
         }
+        */
     }
 
     fn draw_txn_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
@@ -1188,7 +1185,6 @@ impl<'a, T: data::Data> TUI<'a, T> {
 
         let txn_items = if let Some(block_at_offset) = block_selection {
             let block_fetch = self.database.get_block_with_transactions(block_at_offset);
-            let receipts_fetch = self.database.get_block_receipts(block_at_offset);
 
             self.txn_list_length = None;
             use data::RequestStatus::*;
@@ -1216,19 +1212,19 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         self.txn_list_state.select(Some(0));
                     }
 
-                    let receipts: Option<&Vec<TransactionReceipt>> =
-                        if let Completed(ref receipts) = receipts_fetch {
-                            Some(receipts)
-                        } else {
-                            None
-                        };
+                    let receipts: Vec<data::RequestStatus<TransactionReceipt>> = block
+                        .transactions
+                        .iter()
+                        .map(|txn| txn.hash)
+                        .map(|txhash| self.database.get_transaction_receipt(txhash))
+                        .collect();
 
                     self.txn_list_length = Some(block.transactions.len());
                     block_to_txn_list_items(
                         &self.txn_columns,
                         &self.receipt_columns,
                         &block,
-                        receipts,
+                        &receipts,
                     )
                 }
             }

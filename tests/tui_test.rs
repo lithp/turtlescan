@@ -47,6 +47,13 @@ impl data::Data for FakeDB {
     ) -> data::RequestStatus<Vec<TransactionReceipt>> {
         data::RequestStatus::Waiting()
     }
+
+    fn get_transaction_receipt<T: Into<TxHash>>(
+        &mut self,
+        _txhash: T,
+    ) -> data::RequestStatus<TransactionReceipt> {
+        data::RequestStatus::Waiting()
+    }
     fn invalidate_block(&mut self, _blocknum: u64) {}
 }
 
