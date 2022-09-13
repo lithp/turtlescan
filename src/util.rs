@@ -23,6 +23,45 @@ pub fn format_block_hash(hash: &[u8]) -> String {
     result
 }
 
+pub fn format_bytes_into_width(hash: &[u8], width: usize) -> String {
+    assert!(width >= 8);  // e.g. "0x01..ff"
+                          
+    let mut formatted_bytes: String = String::new();
+    for byte in hash.iter() {
+        write!(formatted_bytes, "{:02x}", byte).expect("oops");
+    }
+    
+    assert!(formatted_bytes.len() % 2 == 0); // each byte adds 2 chars
+    
+    if 2 + formatted_bytes.len() <= width {
+        // easy, it already fits!
+        return String::from("0x") + &formatted_bytes
+    }
+    
+    // at this point we know `result.len() > width - 2`
+    // and we know `width >= 8`
+    // so `result.len() > 6, it looks something like "010203[...]"
+    let trim_length = 2 + formatted_bytes.len() - width;
+    
+    // imagine a string just 2 chars longer than `width`. If we remove 2 chars and
+    // then add ".." back in then we'll have made no progress! By trimming out 2 extra
+    // chars we create space for our substitution
+    let trim_length = trim_length + 2;
+    
+    // how much of the string is _not_ being trimmed 
+    let remainder = formatted_bytes.len() - trim_length;
+
+    let left_remainder = remainder.div_euclid(2); // explicitly round to 0
+    let right_remainder = remainder - left_remainder;
+    
+    let mut result = String::from("0x");
+    result.push_str(&formatted_bytes[..left_remainder]);
+    result.push_str("..");
+    result.push_str(&formatted_bytes[formatted_bytes.len()-right_remainder..]);
+
+    result
+}
+
 pub fn humanize_u256(number: U256) -> String {
     //TODO: lol this code
 
@@ -111,4 +150,31 @@ pub fn format_block(block: &EthBlock<TxHash>) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_block_hash;
+    use super::format_bytes_into_width;
+
+    #[test]
+    fn simple_block_hash() {
+        let hash = [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8];
+        assert_eq!(format_block_hash(&hash), "0x0102..0708");
+    }
+    
+    #[test]
+    fn format_into_width() {
+        let hash = [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8];
+        assert_eq!(format_bytes_into_width(&hash, 8), "0x01..0c");
+        assert_eq!(format_bytes_into_width(&hash, 9), "0x01..b0c");
+        assert_eq!(format_bytes_into_width(&hash, 10), "0x010..b0c");
+        assert_eq!(format_bytes_into_width(&hash, 11), "0x010..0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 12), "0x0102..0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 15), "0x01020..0a0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 20), "0x01020304..090a0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 24), "0x0102030405..08090a0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 25), "0x0102030405..708090a0b0c");
+        assert_eq!(format_bytes_into_width(&hash, 26), "0x0102030405060708090a0b0c");
+    }
 }

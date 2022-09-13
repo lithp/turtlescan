@@ -1,14 +1,16 @@
 use crate::data;
-use crate::util;
+use crate::pane_txn_details;
+use crate::style;
+use crate::column;
+use crate::column::Column;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
-use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, U64};
+
+use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
 use log::{debug, warn};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use std::cmp;
-use std::convert::TryInto;
 use std::error::Error;
 use std::io;
 use std::path;
@@ -23,7 +25,7 @@ use tui::backend::TermionBackend;
 use tui::buffer::Buffer;
 use tui::layout::{Constraint, Direction, Layout, Rect};
 use tui::style::{Color, Modifier, Style};
-use tui::text::{Span, Spans, Text};
+use tui::text::{Span, Spans};
 use tui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
 };
@@ -38,217 +40,6 @@ pub enum UIMessage {
     Refresh(),
 
     Response(data::Response),
-}
-
-struct Column<T> {
-    name: &'static str,
-    width: usize,
-    enabled: bool,
-    render: Box<dyn Fn(&T) -> String>,
-}
-
-fn default_receipt_columns() -> Vec<Column<TransactionReceipt>> {
-    vec![
-        Column {
-            name: "status",
-            width: 7,
-            render: Box::new(|receipt| match receipt.status {
-                None => "unknown".to_string(),
-
-                //TODO(2021-09-15) the docs for this are backwards, contribute a fix!
-                Some(status) => {
-                    if status == U64::from(0) {
-                        "failure".to_string()
-                    } else if status == U64::from(1) {
-                        "success".to_string()
-                    } else {
-                        panic!("unexpected txn status: {}", status)
-                    }
-                }
-            }),
-            enabled: false,
-        },
-        Column {
-            // "gas used is None if the client is running in light client mode"
-            name: "gas used",
-            width: 9,
-            render: Box::new(|receipt| match receipt.gas_used {
-                None => "???".to_string(),
-                Some(gas) => gas.to_string(),
-            }),
-            enabled: true,
-        },
-        Column {
-            name: "total gas",
-            width: 9,
-            render: Box::new(|receipt| receipt.cumulative_gas_used.to_string()),
-            enabled: true,
-        },
-        Column {
-            // TODO in the details pane only render this column if it's Some
-            name: "deployed to",
-            width: 12,
-            render: Box::new(|receipt| {
-                receipt
-                    .contract_address
-                    .map(|addr| addr.to_string())
-                    .unwrap_or("not deployed".to_string())
-            }),
-            enabled: false,
-        },
-        Column {
-            // TODO(2021-09-15): actually render the logs, this reqires writing some parsers
-            name: "log count",
-            width: 9,
-            render: Box::new(|receipt| receipt.logs.len().to_string()),
-            enabled: false,
-        }, // root: Option<H256>
-           // logs_bloom: Bloom
-           // effective_gas_price: Option<U256>
-           //   base fee + priority fee
-    ]
-}
-
-fn default_txn_columns() -> Vec<Column<Transaction>> {
-    vec![
-        Column {
-            name: "idx",
-            width: 3,
-            render: Box::new(|txn| match txn.transaction_index {
-                None => "???".to_string(),
-                Some(i) => i.to_string(),
-            }),
-            enabled: false,
-        },
-        Column {
-            name: "hash",
-            width: 12,
-            render: Box::new(|txn| util::format_block_hash(txn.hash.as_bytes())),
-            enabled: true,
-        },
-        Column {
-            name: "from",
-            width: 12,
-            render: Box::new(|txn| util::format_block_hash(txn.from.as_bytes())),
-            enabled: true,
-        },
-        Column {
-            name: "to",
-            width: 12,
-            render: Box::new(|txn| match txn.to {
-                None => "".to_string(), // e.g. contract creation
-                Some(addr) => util::format_block_hash(addr.as_bytes()),
-            }),
-            enabled: true,
-        },
-        // also, there are more important cols if we fetch out the receipts
-        // more cols:
-        //   nonce: U256
-        //   value: U256
-        //   gas_price: Option<U256>,
-        //   input: Bytes,
-        //   max_priority_fee_per_gas: Option<U256>
-        //   max_fee_per_gas: Option<U256
-    ]
-}
-
-fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
-    //TODO(2021-09-15) also include the uncle count
-    vec![
-        Column {
-            name: "blk num",
-            width: 8,
-            render: Box::new(|block| match block.number {
-                Some(number) => number.to_string(),
-                None => "unknown".to_string(),
-            }),
-            enabled: true,
-        },
-        Column {
-            name: "block hash",
-            width: 12,
-            render: Box::new(|block| match block.hash {
-                Some(hash) => util::format_block_hash(hash.as_bytes()),
-                None => "unknown".to_string(),
-            }),
-            enabled: true,
-        },
-        Column {
-            name: "date UTC",
-            width: 10,
-            render: Box::new(|block| {
-                let timestamp = block.timestamp;
-                let low64 = timestamp.as_u64(); // TODO: panics if too big
-                let low64signed = low64.try_into().unwrap(); // TODO: panic
-                let naive_time = NaiveDateTime::from_timestamp(low64signed, 0);
-                let time = DateTime::<Utc>::from_utc(naive_time, Utc);
-                time.format("%Y-%m-%d").to_string()
-            }),
-            enabled: false,
-        },
-        Column {
-            name: "time UTC",
-            width: 8,
-            render: Box::new(|block| {
-                let timestamp = block.timestamp;
-                let low64 = timestamp.as_u64(); // TODO: panics if too big
-                let low64signed = low64.try_into().unwrap(); // TODO: panic
-                let naive_time = NaiveDateTime::from_timestamp(low64signed, 0);
-                let time = DateTime::<Utc>::from_utc(naive_time, Utc);
-                // %Y-%m-%d for when you want to add the date back in
-                time.format("%H:%M:%S").to_string()
-            }),
-            enabled: true,
-        },
-        Column {
-            name: "parent hash",
-            width: 12,
-            render: Box::new(|block| util::format_block_hash(block.parent_hash.as_bytes())),
-            enabled: true,
-        },
-        Column {
-            name: "coinbase",
-            width: 12,
-            render: Box::new(|block| util::format_block_hash(block.author.as_bytes())),
-            enabled: true,
-        },
-        Column {
-            name: "gas used",
-            width: 9,
-            render: Box::new(|block| block.gas_used.to_string()),
-            enabled: true,
-        },
-        Column {
-            name: "gas limit",
-            width: 9,
-            render: Box::new(|block| block.gas_limit.to_string()),
-            enabled: true,
-        },
-        Column {
-            name: "base fee",
-            width: 8,
-            render: Box::new(|block| match block.base_fee_per_gas {
-                None => "???".to_string(),
-                Some(base_fee) => util::humanize_u256(base_fee),
-            }),
-            enabled: true,
-        },
-        Column {
-            name: "txns",
-            width: 4,
-            render: Box::new(|block| block.transactions.len().to_string()),
-            enabled: true,
-        },
-        Column {
-            name: "size",
-            width: 6,
-            render: Box::new(|block| match block.size {
-                Some(size) => size.to_string(),
-                None => "none".to_string(), // blocks from eth_subscribe have no size
-            }),
-            enabled: true,
-        },
-    ]
 }
 
 fn render_item_with_cols<T>(columns: &Vec<Column<T>>, item: &T) -> String {
@@ -323,26 +114,6 @@ fn block_to_txn_list_items(
         .collect()
 }
 
-const FOCUSED_BORDER: Color = Color::Gray;
-const UNFOCUSED_BORDER: Color = Color::DarkGray;
-
-const FOCUSED_SELECTION: Color = Color::LightGreen;
-const UNFOCUSED_SELECTION: Color = Color::Green;
-
-fn border_color(focused: bool) -> Color {
-    match focused {
-        true => FOCUSED_BORDER,
-        false => UNFOCUSED_BORDER,
-    }
-}
-
-fn selection_color(focused: bool) -> Color {
-    match focused {
-        true => FOCUSED_SELECTION,
-        false => UNFOCUSED_SELECTION,
-    }
-}
-
 #[derive(Debug, Clone)]
 enum PaneState {
     JustBlocks,
@@ -395,6 +166,9 @@ impl PaneState {
         }
     }
 
+    // this used to be called by handle_key_left but that interaction is a little confusing
+    // leaving it in place in case I want to resurrect it under a new keybinding
+    #[allow(dead_code)]
     fn close_all_to_right(&self) -> PaneState {
         use FocusedPane::*;
         use PaneState::*;
@@ -545,13 +319,13 @@ fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -
 
 impl<'a, T: data::Data> TUI<'a, T> {
     pub fn new(database: &'a mut T) -> TUI<'a, T> {
-        let txn_columns = default_txn_columns();
+        let txn_columns = column::default_txn_columns();
         let txn_column_len = txn_columns.len();
 
-        let columns = default_columns();
+        let columns = column::default_columns();
         let column_items_len = columns.len();
 
-        let receipt_columns = default_receipt_columns();
+        let receipt_columns = column::default_receipt_columns();
         let receipt_column_len = receipt_columns.len();
 
         TUI {
@@ -648,13 +422,14 @@ impl<'a, T: data::Data> TUI<'a, T> {
     }
 
     fn handle_key_left(&mut self) {
+        // the arrow keys take you left and right but if you try to scroll past the edge
+        // you close all the other panes
         if self.pane_state.focus() == FocusedPane::Blocks {
             self.pane_state = PaneState::JustBlocks;
             return;
         }
 
         self.pane_state = self.pane_state.prev();
-        self.pane_state = self.pane_state.close_all_to_right();
     }
 
     fn scroll_block_list_up_one_page(&mut self) {
@@ -1021,87 +796,13 @@ impl<'a, T: data::Data> TUI<'a, T> {
     }
 
     fn draw_transaction_details<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let selected_txn: Option<Transaction> = self.txn_list_selected_txn();
-
-        let title = selected_txn
-            .as_ref()
-            .map(|txn| util::format_block_hash(txn.hash.as_bytes()))
-            .unwrap_or("Transaction".to_string());
-
-        let text = if let Some(txn) = selected_txn {
-            let receipt = self.txn_list_selected_receipt();
-            let receipt_spans = match receipt {
-                None => vec![Spans::from("receipt: (fetching)")],
-                Some(receipt) => {
-                    //TODO(2021-09-15) no reason to build a new one every time
-                    //                 how do rust globals work? thread locals?
-                    let columns = default_receipt_columns();
-
-                    let mut result = vec![Spans::from("receipt:")];
-
-                    result.extend::<Vec<Spans>>(
-                        columns
-                            .iter()
-                            .map(|col| {
-                                Spans::from(format!("  {}: {}", col.name, (col.render)(&receipt)))
-                            })
-                            .collect(),
-                    );
-
-                    result
-                }
-            };
-
-            let mut txn_spans = vec![
-                Spans::from("txn:"),
-                //TODO: should probably unify these with the txn columns
-                //TODO: widen the hash based on available space
-                Spans::from(format!("  hash: {}", txn.hash.to_string())),
-                Spans::from(format!("  from: {}", txn.from.to_string())),
-                Spans::from(format!("    nonce: {}", txn.nonce.to_string())),
-                Spans::from(format!(
-                    "  to: {}",
-                    txn.to
-                        .map(|hash| hash.to_string())
-                        .unwrap_or("None".to_string())
-                )),
-                Spans::from(format!("  value: {}", txn.value.to_string())),
-                // TODO(2021-09-15) implement this
-                // Spans::from(format!("  data: {}", txn.input.to_string())),
-                Spans::from(format!(
-                    "  gas price: {}",
-                    txn.gas_price
-                        .map(|price| price.to_string())
-                        .unwrap_or("None".to_string())
-                )),
-                Spans::from(format!(
-                    "  max priority fee: {}",
-                    txn.max_priority_fee_per_gas
-                        .map(|fee| fee.to_string())
-                        .unwrap_or("None".to_string())
-                )),
-                Spans::from(format!(
-                    "  max gas fee: {}",
-                    txn.max_fee_per_gas
-                        .map(|fee| fee.to_string())
-                        .unwrap_or("None".to_string())
-                )),
-            ];
-            txn_spans.extend(receipt_spans);
-
-            Text::from(txn_spans)
-        } else {
-            Text::raw("")
+        let pane = pane_txn_details::PaneTransactionDetails {
+            txn: self.txn_list_selected_txn(),
+            receipt: self.txn_list_selected_receipt(),
+            is_focused: self.pane_state.focus() == FocusedPane::Transaction,
+            area: area,
         };
-
-        let is_focused = self.pane_state.focus() == FocusedPane::Transaction;
-        let widget = Paragraph::new(text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color(is_focused)))
-                .title(title),
-        );
-        frame.render_widget(widget, area);
+        pane.draw(frame);
     }
 
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
@@ -1169,10 +870,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color(is_focused)))
+                    .border_style(Style::default().fg(style::border_color(is_focused)))
                     .title(title),
             )
-            .highlight_style(Style::default().bg(selection_color(is_focused)))
+            .highlight_style(Style::default().bg(style::selection_color(is_focused)))
             .header(header);
         frame.render_stateful_widget(block_list, area, &mut block_list_state);
     }
@@ -1310,10 +1011,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color(is_focused)))
+                    .border_style(Style::default().fg(style::border_color(is_focused)))
                     .title(title),
             )
-            .highlight_style(Style::default().bg(selection_color(is_focused)))
+            .highlight_style(Style::default().bg(style::selection_color(is_focused)))
             .header(header);
         frame.render_stateful_widget(txn_list, area, &mut txn_list_state);
     }
@@ -1388,8 +1089,8 @@ impl<'a, T: data::Data> TUI<'a, T> {
         let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
 
         let status_string = match self.configuring_columns {
-            false => "  (q) quit - (c) configure columns - (←/→) open/close panes - (tab) change focused pane - (g/G) jump to top/bottom",
-            true => "  (c) close col popup - (space) toggle column - (↑/↓) choose column",
+            false => "  (q) quit - (c) configure columns - (←/→/tab) change focused pane - (g/G) jump to top/bottom",
+            true => "  (q/c) close col popup - (space) toggle column - (↑/↓) choose column",
         };
 
         let status_line = Paragraph::new(status_string).block(Block::default().title(bold_title));
@@ -1555,7 +1256,14 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
 
         match message {
             UIMessage::Key(key) => match key {
-                Key::Char('q') | Key::Esc | Key::Ctrl('c') => break 'main,
+                Key::Ctrl('c') => break 'main,
+                Key::Char('q') | Key::Esc => {
+                    if tui.configuring_columns {
+                        tui.toggle_configuring_columns()
+                    } else {
+                        break 'main
+                    }
+                },
                 Key::Char('c') => tui.toggle_configuring_columns(),
                 Key::Up | Key::Char('k') => tui.handle_key_up(),
                 Key::Down | Key::Char('j') => tui.handle_key_down(),
