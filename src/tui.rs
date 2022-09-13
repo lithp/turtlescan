@@ -1,9 +1,10 @@
 use crate::data;
 use crate::pane_txn_details;
+use crate::pane_txn_list;
 use crate::style;
 use crate::column;
 use crate::column::Column;
-
+use crate::header_list::HeaderList;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
@@ -22,12 +23,11 @@ use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 use tui::backend::Backend;
 use tui::backend::TermionBackend;
-use tui::buffer::Buffer;
 use tui::layout::{Constraint, Direction, Layout, Rect};
 use tui::style::{Color, Modifier, Style};
-use tui::text::{Span, Spans};
+use tui::text::Span;
 use tui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph
 };
 use tui::Frame;
 use tui::Terminal;
@@ -40,22 +40,6 @@ pub enum UIMessage {
     Refresh(),
 
     Response(data::Response),
-}
-
-fn render_item_with_cols<T>(columns: &Vec<Column<T>>, item: &T) -> String {
-    columns
-        .iter()
-        .filter(|col| col.enabled)
-        .fold(String::new(), |mut accum, column| {
-            if accum.len() != 0 {
-                accum.push_str(" ");
-            }
-            let rendered = (column.render)(item);
-            let filled = format!("{:>width$}", rendered, width = column.width);
-
-            accum.push_str(&filled);
-            accum
-        })
 }
 
 fn columns_to_list_items<T>(columns: &Vec<Column<T>>, offset: usize) -> Vec<ListItem<'static>> {
@@ -75,44 +59,6 @@ fn columns_to_list_items<T>(columns: &Vec<Column<T>>, offset: usize) -> Vec<List
         .0
 }
 
-fn block_to_txn_list_items(
-    txn_columns: &Vec<Column<Transaction>>,
-    receipt_columns: &Vec<Column<TransactionReceipt>>,
-    transactions: &Vec<&Transaction>,
-    receipts: &Vec<data::RequestStatus<TransactionReceipt>>,
-) -> Vec<ListItem<'static>> {
-    if transactions.len() == 0 {
-        return vec![ListItem::new(Span::raw("this block has no transactions"))];
-    }
-
-    assert!(transactions.len() == receipts.len());
-
-    let txn_spans: Vec<Span> = transactions
-        .iter()
-        .map(|txn| {
-            let formatted = render_item_with_cols(txn_columns, txn);
-            Span::raw(formatted)
-        })
-        .collect();
-
-    use data::RequestStatus::*;
-    let receipt_spans: Vec<Span> = receipts
-        .iter()
-        .map(|status| match status {
-            Waiting() | Started() => Span::raw("fetching"),
-            Completed(receipt) => {
-                let formatted = render_item_with_cols(receipt_columns, receipt);
-                Span::raw(formatted)
-            }
-        })
-        .collect();
-
-    txn_spans
-        .into_iter()
-        .zip(receipt_spans)
-        .map(|(txn, receipt)| ListItem::new(Spans::from(vec![txn, Span::raw(" "), receipt])))
-        .collect()
-}
 
 #[derive(Debug, Clone)]
 enum PaneState {
@@ -189,7 +135,6 @@ enum FocusedPane {
 }
 
 const BLOCK_LIST_BORDER_HEIGHT: usize = 3;
-const TXN_LIST_BORDER_HEIGHT: usize = BLOCK_LIST_BORDER_HEIGHT;
 
 pub struct TUI<'a, T: data::Data> {
     /* UI state */
@@ -263,31 +208,6 @@ fn scroll_down_one(state: &mut ListState, item_count: usize) {
     */
 }
 
-/// decides which transaction which should be at the top of the list
-fn txn_list_bounds(height: usize, top_txn: usize, selected_txn: Option<usize>) -> usize {
-    let height_offset = height.saturating_sub(1);
-
-    match selected_txn {
-        None => {
-            // no adjustment needed
-            return top_txn;
-        }
-        Some(selection) => {
-            let bottom = top_txn + height_offset;
-            if selection > bottom {
-                // we need to scroll down
-                return selection.saturating_sub(height_offset);
-            }
-
-            if selection < top_txn {
-                // we need to scroll up!
-                return selection;
-            }
-
-            return top_txn;
-        }
-    }
-}
 
 fn block_list_bounds(height: u64, top_block: u64, selected_block: Option<u64>) -> (u64, u64) {
     // if you have a list of height 1 the top block and bottom block are the same
@@ -833,7 +753,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
             block_list_state.select(Some(offset as usize));
         }
 
-        let header = columns_to_header(&self.columns);
+        let header = column::columns_to_header(&self.columns);
 
         let block_range = (bottom_block)..(top_block + 1);
         let block_lines = {
@@ -850,7 +770,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
                     let formatted = match fetch {
                         Waiting() => format!("{} waiting", height),
                         Started() => format!("{} fetching", height),
-                        Completed(block) => render_item_with_cols(&self.columns, &block),
+                        Completed(block) => column::render_item_with_cols(&self.columns, &block),
                     };
                     ListItem::new(Span::raw(formatted))
                 })
@@ -878,145 +798,35 @@ impl<'a, T: data::Data> TUI<'a, T> {
         frame.render_stateful_widget(block_list, area, &mut block_list_state);
     }
 
-    fn txn_list_title(&mut self) -> &'static str {
-        const READY: &str = "Transactions";
-        const FETCHING_TXNS: &str = "Transactions (fetching)";
-        // const FETCHING_RECEIPTS: &str = "Transactions (fetching receipts)";
-
-        let block = self.block_list_selected_block;
-        if let None = block {
-            return READY;
-        }
-        let block = block.unwrap();
-
-        use data::RequestStatus::*;
-        let blockfetch = self.database.get_block_with_transactions(block);
-        match blockfetch {
-            Waiting() | Started() => return FETCHING_TXNS,
-            Completed(_) => (),
-        }
-
-        return READY;
-
-        /*
-        let receiptsfetch = self.database.get_block_receipts(block);
-        match receiptsfetch {
-            Waiting() | Started() => return FETCHING_RECEIPTS,
-            Completed(_) => return READY,
-        }
-        */
-    }
-
     fn reset_txn_list_scroll(&mut self) {
         self.txn_list_top = None;
         self.txn_list_selected = None;
     }
 
     fn draw_txn_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        let block_selection = self.block_list_selected_block;
-        let target_height = (area.height as usize).saturating_sub(TXN_LIST_BORDER_HEIGHT);
-
-        if target_height <= 0 {
-            // nothing to draw
-            return;
-        }
-
-        if let None = self.txn_list_top {
-            self.txn_list_top = Some(0);
-        }
-        let top = txn_list_bounds(
-            target_height,
-            self.txn_list_top.unwrap(),
-            self.txn_list_selected,
-        );
-        self.txn_list_top = Some(top);
-
-        let txn_items = if let Some(block_at_offset) = block_selection {
-            let block_fetch = self.database.get_block_with_transactions(block_at_offset);
-
-            self.txn_list_length = None;
-            use data::RequestStatus::*;
-            match block_fetch {
-                Waiting() => {
-                    self.reset_txn_list_scroll();
-                    vec![ListItem::new(Span::raw(format!(
-                        "{} waiting",
-                        block_at_offset
-                    )))]
-                }
-                Started() => {
-                    self.reset_txn_list_scroll();
-                    vec![ListItem::new(Span::raw(format!(
-                        "{} fetching",
-                        block_at_offset
-                    )))]
-                }
-                Completed(block) => {
-                    let has_transactions = block.transactions.len() > 0;
-                    let nothing_selected = self.txn_list_selected.is_none();
-                    if nothing_selected && has_transactions {
-                        self.txn_list_selected = Some(0);
-                    }
-
-                    assert!(top <= block.transactions.len());
-
-                    let receipts: Vec<data::RequestStatus<TransactionReceipt>> = block
-                        .transactions
-                        .iter()
-                        // scrolling
-                        .skip(top)
-                        .take(target_height)
-                        .map(|txn| txn.hash)
-                        .map(|txhash| self.database.get_transaction_receipt(txhash))
-                        .collect();
-
-                    let transactions: Vec<&Transaction> = block
-                        .transactions
-                        .iter()
-                        .skip(top)
-                        .take(target_height)
-                        .collect();
-
-                    self.txn_list_length = Some(block.transactions.len());
-                    block_to_txn_list_items(
-                        &self.txn_columns,
-                        &self.receipt_columns,
-                        &transactions,
-                        &receipts,
-                    )
-                }
-            }
-        } else {
-            Vec::new()
+        let pane = pane_txn_list::PaneTxnList {
+            block_selection: self.block_list_selected_block,
+            block_fetch: match self.block_list_selected_block {
+                None => None,
+                Some(blocknum) => Some(self.database.get_block_with_transactions(blocknum)),
+            },
+            is_focused: self.pane_state.focus() == FocusedPane::Transactions,
+            txn_selection: self.txn_list_selected,
+            
+            txn_columns: &self.txn_columns,
+            receipt_columns: &self.receipt_columns,
         };
-
-        let header = {
-            let mut txn_header: Spans = columns_to_header(&self.txn_columns);
-            let receipt_header: Spans = columns_to_header(&self.receipt_columns);
-            txn_header.0.push(Span::raw(" "));
-            txn_header.0.extend(receipt_header.0);
-            txn_header
+        let mut state = pane_txn_list::State { 
+            txn_list_top: self.txn_list_top,
+            txn_list_length: self.txn_list_length,
+            txn_list_selected: self.txn_list_selected,
         };
-
-        let title = self.txn_list_title();
-
-        let mut txn_list_state = ListState::default();
-        if let Some(selection) = self.txn_list_selected {
-            let offset = selection.saturating_sub(top);
-            txn_list_state.select(Some(offset));
-        };
-
-        let is_focused = self.pane_state.focus() == FocusedPane::Transactions;
-        let txn_list = HeaderList::new(txn_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(style::border_color(is_focused)))
-                    .title(title),
-            )
-            .highlight_style(Style::default().bg(style::selection_color(is_focused)))
-            .header(header);
-        frame.render_stateful_widget(txn_list, area, &mut txn_list_state);
+        pane.draw(frame, area, &mut state, self.database);
+        
+        // it would be cleaner to hold the state in self instead of copying back and forth
+        self.txn_list_top = state.txn_list_top;
+        self.txn_list_length = state.txn_list_length;
+        self.txn_list_selected = state.txn_list_selected;
     }
 
     pub fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
@@ -1302,44 +1112,6 @@ fn centered_rect(frame_size: Rect, desired_height: u16, desired_width: u16) -> R
     }
 }
 
-struct HeaderList<'a> {
-    /*
-     * a List where the first row is a header and does not participate in
-     * scrolling or selection
-     */
-    // we need a lifetime because the Title uses &str to hold text
-    block: Option<Block<'a>>,
-    highlight_style: Style,
-
-    header: Option<Spans<'a>>,
-    items: Vec<ListItem<'a>>,
-}
-
-impl<'a> HeaderList<'a> {
-    fn new(items: Vec<ListItem<'a>>) -> HeaderList<'a> {
-        HeaderList {
-            block: None,
-            highlight_style: Style::default(),
-            items: items,
-            header: None,
-        }
-    }
-
-    fn block(mut self, block: Block<'a>) -> HeaderList<'a> {
-        self.block = Some(block);
-        self
-    }
-
-    fn highlight_style(mut self, style: Style) -> HeaderList<'a> {
-        self.highlight_style = style;
-        self
-    }
-
-    fn header(mut self, header: Spans<'a>) -> HeaderList<'a> {
-        self.header = Some(header);
-        self
-    }
-}
 
 fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
     let spaces = columns.len().saturating_sub(1);
@@ -1349,69 +1121,4 @@ fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
         .fold(0, |accum, column| accum + column.width);
 
     width + spaces
-}
-
-fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans<'static> {
-    let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
-    Spans::from(
-        columns
-            .iter()
-            .filter(|col| col.enabled)
-            .fold(Vec::new(), |mut accum, column| {
-                // soon rust iterators will have an intersperse method
-                if accum.len() != 0 {
-                    accum.push(Span::raw(" "));
-                }
-                let filled = format!("{:<width$}", column.name, width = column.width);
-                accum.push(Span::styled(filled, underline_style));
-                accum
-            }),
-    )
-}
-
-impl<'a> StatefulWidget for HeaderList<'a> {
-    type State = ListState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let inner_area = match self.block {
-            None => area,
-            Some(block) => {
-                let inner = block.inner(area);
-                block.render(area, buf);
-                inner
-            }
-        };
-
-        if inner_area.height < 1 || inner_area.width < 1 {
-            return;
-        }
-
-        let inner_area = match self.header {
-            None => inner_area,
-            Some(spans) => {
-                let paragraph_area = Rect {
-                    x: inner_area.x,
-                    y: inner_area.y,
-                    width: inner_area.width,
-                    height: 1,
-                };
-                Paragraph::new(spans).render(paragraph_area, buf);
-
-                // return the trimmed area
-                Rect {
-                    x: inner_area.x,
-                    y: inner_area.y.saturating_add(1).min(inner_area.bottom()),
-                    width: inner_area.width,
-                    height: inner_area.height.saturating_sub(1),
-                }
-            }
-        };
-
-        if inner_area.height < 1 {
-            return;
-        }
-
-        let inner_list = List::new(self.items).highlight_style(self.highlight_style);
-        StatefulWidget::render(inner_list, inner_area, buf, state);
-    }
 }

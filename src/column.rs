@@ -1,5 +1,6 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash, U64};
+use tui::{text::{Spans, Span}, style::{Style, Modifier}};
 use std::convert::TryInto;
 
 use crate::util;
@@ -213,4 +214,38 @@ pub fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
             enabled: true,
         },
     ]
+}
+
+pub fn columns_to_header<T>(columns: &Vec<Column<T>>) -> Spans<'static> {
+    let underline_style = Style::default().add_modifier(Modifier::UNDERLINED);
+    Spans::from(
+        columns
+            .iter()
+            .filter(|col| col.enabled)
+            .fold(Vec::new(), |mut accum, column| {
+                // soon rust iterators will have an intersperse method
+                if accum.len() != 0 {
+                    accum.push(Span::raw(" "));
+                }
+                let filled = format!("{:<width$}", column.name, width = column.width);
+                accum.push(Span::styled(filled, underline_style));
+                accum
+            }),
+    )
+}
+
+pub fn render_item_with_cols<T>(columns: &Vec<Column<T>>, item: &T) -> String {
+    columns
+        .iter()
+        .filter(|col| col.enabled)
+        .fold(String::new(), |mut accum, column| {
+            if accum.len() != 0 {
+                accum.push_str(" ");
+            }
+            let rendered = (column.render)(item);
+            let filled = format!("{:>width$}", rendered, width = column.width);
+
+            accum.push_str(&filled);
+            accum
+        })
 }

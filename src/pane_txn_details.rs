@@ -28,7 +28,7 @@ impl PaneTransactionDetails {
             .as_ref()
             .map(|txn| util::format_block_hash(txn.hash.as_bytes()))
             .unwrap_or("Transaction".to_string());
-        
+
         let text = match self.txn {
             None => Text::raw(""),
             Some(ref txn) => self.text(txn),
@@ -42,7 +42,7 @@ impl PaneTransactionDetails {
         );
         frame.render_widget(widget, self.area);
     }
-    
+
     // 2022-09-12 this lifetime hint is technically too broad, the Text holds a lifetime to to all
     // the str's we threw into it, but all strs are either 'static or belong to newly created
     // String's. Some day it could be a nice exercise to untangle this.
@@ -53,7 +53,7 @@ impl PaneTransactionDetails {
 
         Text::from(txn_spans)
     }
-    
+
     fn receipt_spans(receipt: &Option<TransactionReceipt>) -> Vec<Spans> {
         match receipt {
             None => vec![Spans::from("receipt: (fetching)")],
