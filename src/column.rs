@@ -119,9 +119,12 @@ pub fn default_txn_columns() -> Vec<Column<Transaction>> {
 
 pub fn default_columns() -> Vec<Column<EthBlock<TxHash>>> {
     //TODO(2021-09-15) also include the uncle count
+    //TODO(2022-09-21) also include the grafitti! And look into hitting an eth2 endpoint for more
     vec![
         Column {
             name: "blk num",
+            // TODO(2022-09-21) make this dynamic? On gorli 7 is better, on a private chain 8
+            // might be too small
             width: 8,
             render: Box::new(|block| match block.number {
                 Some(number) => number.to_string(),

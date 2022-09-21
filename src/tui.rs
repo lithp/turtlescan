@@ -1,10 +1,9 @@
 use crate::data;
 use crate::pane_txn_details;
 use crate::pane_txn_list;
-use crate::style;
+use crate::pane_block_list;
 use crate::column;
 use crate::column::Column;
-use crate::header_list::HeaderList;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
@@ -726,8 +725,8 @@ impl<'a, T: data::Data> TUI<'a, T> {
     }
 
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
-        assert!(!self.database.get_highest_block().is_none());
-        assert!(!self.block_list_top_block.is_none());
+        assert!(self.database.get_highest_block().is_some());
+        assert!(self.block_list_top_block.is_some());
 
         let target_height = area.height.saturating_sub(BLOCK_LIST_BORDER_HEIGHT as u16);
 
@@ -746,56 +745,16 @@ impl<'a, T: data::Data> TUI<'a, T> {
         );
         self.block_list_top_block = Some(top_block);
 
-        let mut block_list_state = ListState::default();
-        if let Some(selection) = self.block_list_selected_block {
-            //TODO: error handling?
-            let offset = top_block - selection;
-            block_list_state.select(Some(offset as usize));
-        }
-
-        let header = column::columns_to_header(&self.columns);
-
-        let block_range = (bottom_block)..(top_block + 1);
-        let block_lines = {
-            let block_lines: Vec<ListItem> = block_range
-                .rev()
-                .map(|blocknum| (blocknum, self.database.get_block(blocknum)))
-                // if we do not do this rust complains there are multiple active closures
-                // which reference self which... might be a legitimate complaint?
-                // TODO(2021-09-16) any better ways to fix this problem?
-                .collect::<Vec<(u64, data::RequestStatus<EthBlock<TxHash>>)>>()
-                .iter()
-                .map(|(height, fetch)| {
-                    use data::RequestStatus::*;
-                    let formatted = match fetch {
-                        Waiting() => format!("{} waiting", height),
-                        Started() => format!("{} fetching", height),
-                        Completed(block) => column::render_item_with_cols(&self.columns, &block),
-                    };
-                    ListItem::new(Span::raw(formatted))
-                })
-                .collect();
-            block_lines
-        };
-
-        let highest_block = self.database.get_highest_block().unwrap();
-        let is_behind = top_block != highest_block;
-        let title = match is_behind {
-            false => "Blocks".to_string(),
-            true => format!("Blocks ({} behind)", highest_block - top_block),
-        };
-
         let is_focused = self.pane_state.focus() == FocusedPane::Blocks;
-        let block_list = HeaderList::new(block_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(style::border_color(is_focused)))
-                    .title(title),
-            )
-            .highlight_style(Style::default().bg(style::selection_color(is_focused)))
-            .header(header);
-        frame.render_stateful_widget(block_list, area, &mut block_list_state);
+        let highest_block = self.database.get_highest_block().unwrap();
+        let pane = pane_block_list::PaneBlockList {
+            highest_block,
+            selected_block: self.block_list_selected_block,
+            top_block, bottom_block,
+            columns: &self.columns,
+            is_focused,
+        };
+        pane.draw(frame, area, self.database);
     }
 
     fn reset_txn_list_scroll(&mut self) {
@@ -823,7 +782,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
         };
         pane.draw(frame, area, &mut state, self.database);
         
-        // it would be cleaner to hold the state in self instead of copying back and forth
+        // it would be cleaner to hold the State in self instead of copying back and forth
         self.txn_list_top = state.txn_list_top;
         self.txn_list_length = state.txn_list_length;
         self.txn_list_selected = state.txn_list_selected;

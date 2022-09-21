@@ -6,5 +6,6 @@ pub mod tui;
 pub mod util;
 pub mod pane_txn_details;
 pub mod pane_txn_list;
+pub mod pane_block_list;
 pub mod style;
 pub mod column;
