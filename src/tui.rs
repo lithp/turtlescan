@@ -655,6 +655,23 @@ impl<'a, T: data::Data> TUI<'a, T> {
         frame.render_widget(Clear, area);
         frame.render_stateful_widget(popup, area, &mut self.column_list_state);
     }
+    
+    // TOOD(2022-09-21) if get_block was generic this method could also be generic
+    fn selected_block(&mut self) -> Option<EthBlock<TxHash>> {
+        if self.block_list_selected_block.is_none() {
+            return None
+        }
+        
+        let blocknum = self.block_list_selected_block.unwrap();
+        let fetch = self.database.get_block(blocknum);
+
+        use crate::data::RequestStatus::*;
+        
+        match fetch {
+            Waiting() | Started() => None,
+            Completed(block) => Some(block),
+        }
+    }
 
     fn txn_list_selected_txn_index(&mut self) -> Option<(u64, usize)> {
         let selected_block: Option<u64> = self.block_list_selected_block;
@@ -816,15 +833,22 @@ impl<'a, T: data::Data> TUI<'a, T> {
             .constraints([Constraint::Min(0), Constraint::Length(bottom_chunk_height)].as_ref())
             .split(frame.size());
 
-        let pane_chunk = vert_chunks[0];
+        self.draw_main_chunk(frame, vert_chunks[0]);
+        self.draw_status_bar(frame, vert_chunks[1]);
 
+        if self.configuring_columns {
+            self.draw_popup(frame);
+        }
+    }
+    
+    fn draw_main_chunk<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
         match self.pane_state {
             PaneState::JustBlocks => {
-                self.draw_block_list(frame, pane_chunk);
+                self.draw_block_list(frame, area);
             }
 
             PaneState::BlocksTransactions(_) => {
-                let (blocks_width, txns_width) = self.allocate_width_two_panes(pane_chunk.width);
+                let (blocks_width, txns_width) = self.allocate_width_two_panes(area.width);
 
                 let horiz_chunks = Layout::default()
                     .direction(Direction::Horizontal)
@@ -832,7 +856,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         Constraint::Length(blocks_width),
                         Constraint::Length(txns_width),
                     ])
-                    .split(pane_chunk);
+                    .split(area);
 
                 self.draw_block_list(frame, horiz_chunks[0]);
                 self.draw_txn_list(frame, horiz_chunks[1]);
@@ -842,7 +866,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
                 let horiz_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Min(0), Constraint::Length(40)])
-                    .split(pane_chunk);
+                    .split(area);
 
                 let (blocks_width, txns_width) =
                     self.allocate_width_two_panes(horiz_chunks[0].width);
@@ -860,12 +884,6 @@ impl<'a, T: data::Data> TUI<'a, T> {
                 self.draw_txn_list(frame, horiz_chunks[1]);
                 self.draw_transaction_details(frame, txn_pane_chunk);
             }
-        }
-        
-        self.draw_status_bar(frame, vert_chunks[1]);
-
-        if self.configuring_columns {
-            self.draw_popup(frame);
         }
     }
     
@@ -891,13 +909,9 @@ impl<'a, T: data::Data> TUI<'a, T> {
     // TODO(2022-09-21) this is called twice-per-frame, add some kind of memoization?
     fn status_string(&mut self, width: u16)-> Option<String> {
         if self.pane_state.focus() == FocusedPane::Blocks && self.block_list_selected_block.is_some() {
-            let selected_block = self.block_list_selected_block.unwrap();
-            let block_fetch = self.database.get_block(selected_block);
-            
-            use crate::data::RequestStatus::*;
-            match block_fetch {
-                Waiting() | Started() => None,
-                Completed(block) => {
+            match self.selected_block() {
+                None => None,
+                Some(block) => {
                     match block.hash {
                         None => None,  // TODO: how could this ever be None?
                         Some(hash) => {

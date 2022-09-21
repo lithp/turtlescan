@@ -122,6 +122,8 @@ pub trait Data {
     fn apply_progress(&mut self, progress: Response);
     fn bump_highest_block(&self, blocknum: u64);
     fn get_highest_block(&self) -> Option<u64>;
+    
+    // TODO(2022-09-21) it might be better for this to be a generic get_block with a type param
     fn get_block(&mut self, blocknum: u64) -> RequestStatus<EthBlock<TxHash>>;
     fn get_block_with_transactions(
         &mut self,
