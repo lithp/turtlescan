@@ -58,7 +58,6 @@ fn columns_to_list_items<T>(columns: &Vec<Column<T>>, offset: usize) -> Vec<List
         .0
 }
 
-
 #[derive(Debug, Clone)]
 enum PaneState {
     JustBlocks,
@@ -160,12 +159,6 @@ pub struct TUI<'a, T: data::Data> {
     column_items_len: usize,
 
     database: &'a mut T,
-}
-
-fn list_state_with_selection(selection: Option<usize>) -> ListState {
-    let mut res = ListState::default();
-    res.select(selection);
-    res
 }
 
 fn scroll_up_one(state: &mut ListState, item_count: usize) {
@@ -517,8 +510,15 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         None => {}
                         Some(selection) => {
                             if let Some(highest) = self.database.get_highest_block() {
-                                let new_selection = cmp::min(highest, selection + 1);
-                                self.select_block(Some(new_selection));
+                                if selection == highest {
+                                    // enter follow mode if you try to scroll up while looking at the
+                                    // highest block
+                                    self.select_block(None);
+                                } else {
+                                    // the cmp::min is not strictly necessary but adds safety-under-refactor
+                                    let new_selection = cmp::min(highest, selection + 1);
+                                    self.select_block(Some(new_selection));
+                                }
                             }
                         }
                     };
@@ -1071,7 +1071,6 @@ fn centered_rect(frame_size: Rect, desired_height: u16, desired_width: u16) -> R
     }
 }
 
-
 fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
     let spaces = columns.len().saturating_sub(1);
     let width = columns
@@ -1080,4 +1079,10 @@ fn columns_to_desired_width<T>(columns: &Vec<Column<T>>) -> usize {
         .fold(0, |accum, column| accum + column.width);
 
     width + spaces
+}
+
+fn list_state_with_selection(selection: Option<usize>) -> ListState {
+    let mut res = ListState::default();
+    res.select(selection);
+    res
 }

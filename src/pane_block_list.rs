@@ -47,21 +47,28 @@ impl<'a> PaneBlockList<'a> {
             block_lines
         };
 
-        let is_behind = self.top_block != self.highest_block;
-        let title = match is_behind {
-            false => "Blocks".to_string(),
-            true => format!("Blocks ({} behind)", self.highest_block - self.top_block),
-        };
-
         let block_list = HeaderList::new(block_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(style::border_color(self.is_focused)))
-                    .title(title),
+                    .title(self.title()),
             )
             .highlight_style(Style::default().bg(style::selection_color(self.is_focused)))
             .header(header);
         frame.render_stateful_widget(block_list, area, &mut block_list_state);
+    }
+    
+    fn title(&self) -> String {
+        let is_behind = self.top_block != self.highest_block;
+        let has_selection = self.selected_block.is_some();
+        
+        if is_behind {
+            format!("Blocks ({} behind)", self.highest_block - self.top_block)
+        } else if !has_selection {
+            "Blocks (following tip)".to_string()
+        } else {
+            "Blocks".to_string()
+        }
     }
 }
