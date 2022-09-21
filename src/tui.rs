@@ -4,6 +4,7 @@ use crate::pane_txn_list;
 use crate::pane_block_list;
 use crate::column;
 use crate::column::Column;
+use crate::util;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
@@ -802,11 +803,17 @@ impl<'a, T: data::Data> TUI<'a, T> {
             self.block_list_top_block = self.database.get_highest_block();
             assert!(!self.block_list_top_block.is_none());
         };
+        
+        let status_string = self.status_string(frame.size().width);
+        let bottom_chunk_height = match status_string {
+            None => 2,
+            Some(_) => 3,
+        };
 
         let vert_chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref())
+            .constraints([Constraint::Min(0), Constraint::Length(bottom_chunk_height)].as_ref())
             .split(frame.size());
 
         let pane_chunk = vert_chunks[0];
@@ -854,19 +861,68 @@ impl<'a, T: data::Data> TUI<'a, T> {
                 self.draw_transaction_details(frame, txn_pane_chunk);
             }
         }
-
-        let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
-
-        let status_string = match self.configuring_columns {
-            false => "  (q) quit - (c) configure columns - (←/→/tab) change focused pane - (g/G) jump to top/bottom",
-            true => "  (q/c) close col popup - (space) toggle column - (↑/↓) choose column",
-        };
-
-        let status_line = Paragraph::new(status_string).block(Block::default().title(bold_title));
-        frame.render_widget(status_line, vert_chunks[1]);
+        
+        self.draw_status_bar(frame, vert_chunks[1]);
 
         if self.configuring_columns {
             self.draw_popup(frame);
+        }
+    }
+    
+    fn draw_status_bar<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
+        let bold_title = Span::styled("turtlescan", Style::default().add_modifier(Modifier::BOLD));
+
+        let help_string = match self.configuring_columns {
+            false => "  (q) quit - (c) configure columns - (←/→/tab) change focused pane - (g/G) jump to top/bottom",
+            true => "  (q/c) close col popup - (space) toggle column - (↑/↓) choose column",
+        };
+        let status_string = self.status_string(area.width);
+        
+        let paragraph = match status_string {
+            None => String::from(help_string),
+            Some(line) => String::from(help_string) + "\n" + &line,
+        };
+
+        let status_line = Paragraph::new(paragraph).block(Block::default().title(bold_title));
+
+        frame.render_widget(status_line, area);
+    }
+    
+    // TODO(2022-09-21) this is called twice-per-frame, add some kind of memoization?
+    fn status_string(&mut self, width: u16)-> Option<String> {
+        if self.pane_state.focus() == FocusedPane::Blocks && self.block_list_selected_block.is_some() {
+            let selected_block = self.block_list_selected_block.unwrap();
+            let block_fetch = self.database.get_block(selected_block);
+            
+            use crate::data::RequestStatus::*;
+            match block_fetch {
+                Waiting() | Started() => None,
+                Completed(block) => {
+                    match block.hash {
+                        None => None,  // TODO: how could this ever be None?
+                        Some(hash) => {
+                            let prefix = String::from("  block_hash=");
+                            let remaining_width = width as usize - prefix.len();
+                            let rest = util::format_bytes_into_width(hash.as_bytes(), remaining_width);
+                            
+                            Some(prefix + &rest)
+                        }
+                    }
+                }
+            }
+        } else if self.pane_state.focus() == FocusedPane::Transactions || self.pane_state.focus() == FocusedPane::Transaction {
+            match self.txn_list_selected_txn() {
+                None => None,
+                Some(txn) => {
+                    let prefix = String::from("  txn_hash=");
+                    let remaining_width = width as usize - prefix.len();
+                    let rest = util::format_bytes_into_width(txn.hash.as_bytes(), remaining_width);
+                    
+                    Some(prefix + &rest)
+                }
+            }
+        } else {
+            None
         }
     }
 
