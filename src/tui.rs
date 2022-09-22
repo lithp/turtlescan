@@ -11,6 +11,7 @@ use ethers_providers::{Provider, Ws};
 use log::{debug, warn};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
+use tui::text::Spans;
 use std::cmp;
 use std::error::Error;
 use std::io;
@@ -159,6 +160,10 @@ pub struct TUI<'a, T: data::Data> {
     columns: Vec<Column<EthBlock<TxHash>>>,
     column_items_len: usize,
 
+    // From normal mode hitting ":" enters command mode
+    // If Some(...) we are entering a command
+    partial_command: Option<String>,
+
     database: &'a mut T,
 }
 
@@ -264,9 +269,103 @@ impl<'a, T: data::Data> TUI<'a, T> {
 
             receipt_columns: receipt_columns,
             receipt_column_len: receipt_column_len,
+            
+            partial_command: None,
 
             database: database,
         }
+    }
+    
+    fn entering_command(&self) -> bool {
+        return self.partial_command.is_some()
+    }
+    
+    // returns whether the user asked us to quit the eventloop
+    fn handle_key(&mut self, key: Key) -> bool {
+        if self.entering_command() {
+            // TODO: is there a readline library which can be used here?
+            //       making a text input which feels good is going to take a lot of work
+            
+            if self.partial_command.is_none() {
+                self.partial_command = Some(String::from(""));
+            }
+
+            let cmd = self.partial_command.as_mut().unwrap();
+            
+            match key {
+                Key::Esc => {
+                    self.partial_command = None;
+                },
+                Key::Backspace => {
+                    cmd.pop();
+                    self.partial_command = Some(cmd.to_string());  // TODO: remove the Copy
+                },
+                Key::Char('\t') => {
+                    // eventually: autocompletions
+                },
+                Key::Char('\n') => {
+                    // TODO(2022-09-21): somehow unify this with the code in command_hint,
+                    //                   currently there's a v high risk they go out of sync
+                    if cmd.len() == 0 {
+                        // this case is important, because all() passes even if the string has 0 chars
+                    } else if cmd == "q" || cmd == "quit" {
+                        return true
+                    } else if cmd.chars().all(|char| char.is_numeric()) {
+                        let blocknum = cmd.parse::<u64>();
+                        match blocknum {
+                            Ok(blocknum) => {
+                                self.select_block(Some(blocknum));
+                            },
+                            Err(e) => {
+                                debug!("block parse error: {:?}", e);
+                            }
+                        };
+                    } else {
+                        debug!("unhandled command: {:?}", cmd);
+                    }
+
+                    self.partial_command = None;
+                }
+                Key::Char(char) => {
+                    cmd.push(char);
+                    self.partial_command = Some(cmd.to_string());
+                }
+                key => {
+                    debug!("unhandled key press: {:?}", key)
+                }
+            }
+
+            return false
+        }
+        
+        match key {
+            Key::Char('q') | Key::Esc => {
+                if self.configuring_columns {
+                    self.configuring_columns = false
+                } else {
+                    return true
+                }
+            }
+            Key::Char(':') => {
+                self.partial_command = Some("".to_string());
+            },
+            Key::Char('c') => self.toggle_configuring_columns(),
+            Key::Up | Key::Char('k') => self.handle_key_up(),
+            Key::Down | Key::Char('j') => self.handle_key_down(),
+            Key::Right | Key::Char('l') => self.handle_key_right(),
+            Key::Left | Key::Char('h') => self.handle_key_left(),
+            Key::PageUp | Key::Ctrl('u') => self.handle_scroll_up_one_page(),
+            Key::PageDown | Key::Ctrl('d') => self.handle_scroll_down_one_page(),
+            Key::Char(' ') => self.handle_key_space(),
+            Key::Char('g') => self.handle_scroll_to_top(),
+            Key::Char('G') => self.handle_scroll_to_bottom(),
+            Key::Char('\t') => self.handle_tab(true),
+            Key::BackTab => self.handle_tab(false),
+            key => {
+                debug!("unhandled key press: {:?}", key)
+            }
+        }
+        return false
     }
 
     fn apply_progress(&mut self, progress: data::Response) {
@@ -821,8 +920,8 @@ impl<'a, T: data::Data> TUI<'a, T> {
             assert!(!self.block_list_top_block.is_none());
         };
         
-        let status_string = self.status_string(frame.size().width);
-        let bottom_chunk_height = match status_string {
+        let status_spans = self.status_spans(frame.size().width);
+        let bottom_chunk_height = match status_spans {
             None => 2,
             Some(_) => 3,
         };
@@ -894,11 +993,13 @@ impl<'a, T: data::Data> TUI<'a, T> {
             false => "  (q) quit - (c) configure columns - (←/→/tab) change focused pane - (g/G) jump to top/bottom",
             true => "  (q/c) close col popup - (space) toggle column - (↑/↓) choose column",
         };
-        let status_string = self.status_string(area.width);
+        let help_spans = Spans::from(Span::raw(help_string));
+
+        let status_spans = self.status_spans(area.width);
         
-        let paragraph = match status_string {
-            None => String::from(help_string),
-            Some(line) => String::from(help_string) + "\n" + &line,
+        let paragraph = match status_spans {
+            None => vec![help_spans],
+            Some(spans) => vec![help_spans, spans],
         };
 
         let status_line = Paragraph::new(paragraph).block(Block::default().title(bold_title));
@@ -906,9 +1007,42 @@ impl<'a, T: data::Data> TUI<'a, T> {
         frame.render_widget(status_line, area);
     }
     
+    fn command_hint(&self) -> Option<Span> {
+        if self.partial_command.is_none() {
+            return None
+        }
+        let cmd = self.partial_command.as_ref().unwrap();
+        
+        let hint = if cmd.len() == 0 {
+            "enter a command".to_string()
+        } else if cmd == "q" || cmd == "quit" {
+            "quit".to_string()
+        } else if cmd.chars().all(|char| char.is_numeric()) {
+            format!("jump to block {}", cmd)
+        } else {
+            "unknown command".to_string()
+        };
+
+        let hint = format!(" ({})", hint);
+        
+        
+        Some(Span::styled(hint, Style::default().fg(Color::Gray)))
+    }
+    
     // TODO(2022-09-21) this is called twice-per-frame, add some kind of memoization?
-    fn status_string(&mut self, width: u16)-> Option<String> {
-        if self.pane_state.focus() == FocusedPane::Blocks && self.block_list_selected_block.is_some() {
+    fn status_spans(&mut self, width: u16)-> Option<Spans> {
+        if self.entering_command() {
+            let prefix = String::from("  :");
+            let cmd = self.partial_command.as_ref().unwrap();
+            
+            let prefix_and_cmd = Span::raw(prefix + cmd);
+            
+            let hint = self.command_hint();
+            match hint {
+                None => Some(Spans::from(prefix_and_cmd)),
+                Some(span) => Some(Spans::from(vec![prefix_and_cmd, span]))
+            }
+        } else if self.pane_state.focus() == FocusedPane::Blocks && self.block_list_selected_block.is_some() {
             match self.selected_block() {
                 None => None,
                 Some(block) => {
@@ -918,8 +1052,9 @@ impl<'a, T: data::Data> TUI<'a, T> {
                             let prefix = String::from("  block_hash=");
                             let remaining_width = width as usize - prefix.len();
                             let rest = util::format_bytes_into_width(hash.as_bytes(), remaining_width);
+                            let result = prefix + &rest;
                             
-                            Some(prefix + &rest)
+                            Some(Spans::from(Span::raw(result)))
                         }
                     }
                 }
@@ -931,8 +1066,9 @@ impl<'a, T: data::Data> TUI<'a, T> {
                     let prefix = String::from("  txn_hash=");
                     let remaining_width = width as usize - prefix.len();
                     let rest = util::format_bytes_into_width(txn.hash.as_bytes(), remaining_width);
+                    let result = prefix + &rest;
                     
-                    Some(prefix + &rest)
+                    Some(Spans::from(Span::raw(result)))
                 }
             }
         } else {
@@ -1096,28 +1232,13 @@ pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), 
         match message {
             UIMessage::Key(key) => match key {
                 Key::Ctrl('c') => break 'main,
-                Key::Char('q') | Key::Esc => {
-                    if tui.configuring_columns {
-                        tui.toggle_configuring_columns()
-                    } else {
+                key => {
+                    let should_quit = tui.handle_key(key);
+                    if should_quit {
                         break 'main
                     }
-                },
-                Key::Char('c') => tui.toggle_configuring_columns(),
-                Key::Up | Key::Char('k') => tui.handle_key_up(),
-                Key::Down | Key::Char('j') => tui.handle_key_down(),
-                Key::Right | Key::Char('l') => tui.handle_key_right(),
-                Key::Left | Key::Char('h') => tui.handle_key_left(),
-                Key::PageUp | Key::Ctrl('u') => tui.handle_scroll_up_one_page(),
-                Key::PageDown | Key::Ctrl('d') => tui.handle_scroll_down_one_page(),
-                Key::Char(' ') => tui.handle_key_space(),
-                Key::Char('g') => tui.handle_scroll_to_top(),
-                Key::Char('G') => tui.handle_scroll_to_bottom(),
-                Key::Char('\t') => tui.handle_tab(true),
-                Key::BackTab => tui.handle_tab(false),
-                key => {
-                    debug!("unhandled key press: {:?}", key)
                 }
+
             },
             UIMessage::Refresh() => {}
             UIMessage::Response(progress) => {
