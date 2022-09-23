@@ -1,13 +1,17 @@
+
 use crate::util;
 use crate::style;
 use crate::column;
+use crate::widget_tree::Tree;
+use crate::widget_tree::TreeItem;
+use crate::widget_tree::TreeState;
 
 use ethers_core::types::Transaction;
 use ethers_core::types::TransactionReceipt;
 use tui::style::Style;
+use tui::text::Span;
 use tui::text::Spans;
-use tui::text::Text;
-use tui::widgets::{Paragraph, Block, Borders};
+use tui::widgets::{Block, Borders};
 use tui::{backend::Backend, Frame};
 use tui::layout::Rect;
 
@@ -21,107 +25,124 @@ pub struct PaneTransactionDetails {
 }
 
 impl PaneTransactionDetails {
-    pub fn draw<B: Backend>(&self, frame: &mut Frame<B>) {
+    pub fn draw<B: Backend>(&self, frame: &mut Frame<B>, state: &mut TreeState) {
         let txn = &self.txn;
 
+        // TODO(2022-09-23) take up as much width as we can
         let title = txn
             .as_ref()
             .map(|txn| util::format_block_hash(txn.hash.as_bytes()))
             .unwrap_or("Transaction".to_string());
-
-        let text = match self.txn {
-            None => Text::raw(""),
-            Some(ref txn) => self.text(txn),
-        };
-
-        let widget = Paragraph::new(text).block(
+        
+        let tree_item = self.items(state);
+        
+        let widget = Tree::new(tree_item).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(style::border_color(self.is_focused)))
                 .title(title),
         );
-        frame.render_widget(widget, self.area);
+        
+        frame.render_stateful_widget(widget, self.area, state);
     }
-
-    // 2022-09-12 this lifetime hint is technically too broad, the Text holds a lifetime to to all
-    // the str's we threw into it, but all strs are either 'static or belong to newly created
-    // String's. Some day it could be a nice exercise to untangle this.
-    fn text<'a>(&'a self, txn: &'a Transaction) -> Text {
-        let mut txn_spans = Self::txn_spans(txn, self.area);
-        let receipt_spans = Self::receipt_spans(&self.receipt);
-        txn_spans.extend(receipt_spans);
-
-        Text::from(txn_spans)
-    }
-
-    fn receipt_spans(receipt: &Option<TransactionReceipt>) -> Vec<Spans> {
-        match receipt {
-            None => vec![Spans::from("receipt: (fetching)")],
-            Some(receipt) => {
-                //TODO(2021-09-15) no reason to build a new one every time
-                //                 how do rust globals work? thread locals?
-                let columns = column::default_receipt_columns();
-
-                let mut result = vec![Spans::from("receipt:")];
-
-                result.extend::<Vec<Spans>>(
-                    columns
-                        .iter()
-                        .map(|col| {
-                            Spans::from(format!("  {}: {}", col.name, (col.render)(&receipt)))
-                        })
-                        .collect(),
-                );
-
-                result
+    
+    pub fn items(&self, state: &TreeState) -> Vec<TreeItem<Spans>> {
+        let mut txn_selection = None;
+        match state.selection {
+            None => (),
+            Some(ref selection) => {
+                match selection.get(0) {
+                    None => (),
+                    Some(idx) => {
+                        if *idx == 0 {
+                            txn_selection = selection.get(1).cloned();
+                        }
+                    }
+                }
+            }
+        }
+        
+        match &self.txn {
+            None => vec![],
+            Some(txn) => {
+                vec![
+                    self.txn_tree_item(txn, txn_selection),
+                    Self::receipt_tree_item(&self.receipt),
+                ]
             }
         }
     }
     
-    fn txn_spans(txn: &Transaction, area: Rect) -> Vec<Spans> {
-        // TODO: this logic should also apply to "deployed to" from our receipt_spans,
-        //       this means either inlining the important columns here
-        //       or passing the available width in to the column render function
-        let hash_to_span = |hash: &[u8], title: &str| -> Spans {
-            let avail_width = (area.width - 2 - 4) as usize - title.len();
-            Spans::from(format!(
-                "  {}: {}",
-                title,
-                util::format_bytes_into_width(hash, avail_width)
-            ))
-        };
-
-        vec![
-            Spans::from("txn:"),
-            //TODO: should probably unify these with the txn columns
-            hash_to_span(txn.hash.as_bytes(), "hash"),
-            hash_to_span(txn.from.as_bytes(), "from"),
-            Spans::from(format!("    nonce: {}", txn.nonce.to_string())),
+    // this breaks encapsulation: it hard-codes an idea of how Tree handles indentation
+    // TODO(2-2209-23): this should also be called to render the "deployed to" column in our receipt items
+    fn make_kv_from_hash<'a>(width: u16, key: &'a str, hash: &[u8]) -> (&'a str, String) {
+        let avail_width = (width - 2 - 2 - 4) as usize - key.len();
+        
+        (key, util::format_bytes_into_width(hash, avail_width))
+    }
+    
+    // TODO(2022-09-23) this should probably be unified with our txn columns
+    fn txn_tree_item(&self, txn: &Transaction, selection_offset: Option<usize>) -> TreeItem<Spans> {
+        // TODO: how do we represent `txn.inpur`?
+        //       we should at very least print and try to parse the 4bytes!
+        let kvs = vec![
+            Self::make_kv_from_hash(self.area.width, "hash", txn.hash.as_bytes()),
+            Self::make_kv_from_hash(self.area.width, "from", txn.from.as_bytes()),
+            ("nonce", txn.nonce.to_string()),
             match txn.to {
-                None => Spans::from("  to: "),
-                Some(hash) => hash_to_span(hash.as_bytes(), "to")
+                None => ("to", "".to_owned()),
+                Some(hash) => Self::make_kv_from_hash(self.area.width, "to", hash.as_bytes()),
             },
-            Spans::from(format!("  value: {}", txn.value.to_string())),
-            // TODO(2021-09-15) implement this
-            // Spans::from(format!("  data: {}", txn.input.to_string())),
-            Spans::from(format!(
-                "  gas price: {}",
-                txn.gas_price
-                    .map(|price| price.to_string())
-                    .unwrap_or("None".to_string())
-            )),
-            Spans::from(format!(
-                "  max priority fee: {}",
-                txn.max_priority_fee_per_gas
-                    .map(|fee| fee.to_string())
-                    .unwrap_or("None".to_string())
-            )),
-            Spans::from(format!(
-                "  max gas fee: {}",
-                txn.max_fee_per_gas
-                    .map(|fee| fee.to_string())
-                    .unwrap_or("None".to_string())
-            )),
-        ]
+            ("value", txn.value.to_string()),
+            ("gas price", txn.gas_price.map(|price| price.to_string()).unwrap_or("None".to_string())),
+            ("max priority fee", txn.max_priority_fee_per_gas.map(|price| price.to_string()).unwrap_or("None".to_string())),
+            ("max gas fee", txn.max_fee_per_gas.map(|price| price.to_string()).unwrap_or("None".to_string())),
+        ];
+        
+        let children: Vec<Spans> = kvs.iter().enumerate().map(|(idx, (key, value))| {
+            let selected = match selection_offset {
+                None => false,
+                Some(selection) => idx == selection,
+            };
+            
+            if selected {
+                Spans::from(vec![
+                    Span::from(format!("{}: ", key)),
+                    Span::styled(format!("{}", value), Style::default().bg(style::selection_color(self.is_focused))),
+                ])
+            } else {
+                Spans::from(format!("{}: {}", key, value))
+            }
+        }).collect();
+        let children: Vec<TreeItem<Spans>> = children.into_iter().map(|s| TreeItem::from(s)).collect();
+        
+        let content = Spans::from("txn:");
+        
+        TreeItem { content, children }
+    }
+    
+    fn receipt_tree_item(receipt: &Option<TransactionReceipt>) -> TreeItem<Spans> {
+        let content = match receipt {
+            None => Spans::from("receipt: (fetching)"),
+            Some(_) => Spans::from("receipt:"),
+        };
+        
+        let children = match receipt {
+            None => vec![],
+            Some(receipt) => {
+                let columns = column::default_receipt_columns();
+                
+                columns.iter()
+                    .map(|col| {
+                        TreeItem::new(Spans::from(format!("  {}: {}", col.name, (col.render)(&receipt))))
+                    })
+                    .collect()
+            }
+        };
+        
+        TreeItem {
+            content: content,
+            children: children,
+        }
     }
 }

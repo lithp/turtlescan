@@ -9,3 +9,4 @@ pub mod pane_txn_list;
 pub mod pane_block_list;
 pub mod style;
 pub mod column;
+pub mod widget_tree;

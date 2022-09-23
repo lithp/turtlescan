@@ -5,6 +5,7 @@ use crate::pane_block_list;
 use crate::column;
 use crate::column::Column;
 use crate::util;
+use crate::widget_tree::TreeState;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
@@ -147,6 +148,8 @@ pub struct TUI<'a, T: data::Data> {
     txn_list_top: Option<usize>, // the index of the topmost transaction in view
     txn_list_selected: Option<usize>, // the index of the selected transaction
     txn_list_length: Option<usize>,
+    
+    txn_details_state: TreeState,
 
     configuring_columns: bool,
     pane_state: PaneState,
@@ -257,6 +260,8 @@ impl<'a, T: data::Data> TUI<'a, T> {
             txn_list_top: None,
             txn_list_selected: None,
             txn_list_length: None,
+            
+            txn_details_state: TreeState::default(),
 
             configuring_columns: false,
             pane_state: PaneState::JustBlocks,
@@ -838,7 +843,11 @@ impl<'a, T: data::Data> TUI<'a, T> {
             is_focused: self.pane_state.focus() == FocusedPane::Transaction,
             area: area,
         };
-        pane.draw(frame);
+        
+        // hard-coded for now, eventually the user should have control over this
+        self.txn_details_state.select(vec![0, 1]);
+        
+        pane.draw(frame, &mut self.txn_details_state);
     }
 
     fn draw_block_list<B: Backend>(&mut self, frame: &mut Frame<B>, area: Rect) {
