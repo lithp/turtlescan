@@ -135,4 +135,47 @@ impl PaneTransactionDetails {
 
         result
     }
+    
+    // if the selected item is a hash then return the full hash, so the user can copy-paste
+    pub fn status_line(width: u16, txn: &Option<Transaction>, receipt: &Option<TransactionReceipt>, state: &TreeState) -> Option<String> {
+        let mut area = Rect::default();
+        area.width = width;
+
+        // the best and worse part of working on personal projects is that sometimes you can just
+        // do the hack. It would be much better to refactor such that items() is a static method
+        // but here we are.
+        let tmp = PaneTransactionDetails {
+            txn: txn.to_owned(),
+            receipt: receipt.to_owned(),
+            is_focused: true,
+            area,
+        };
+        
+        let items = tmp.items();
+        let root = TreeItem {
+            // hack number 2, really tmp.items() should return the root item
+            //                and it should be valid for render to be empty
+            render: Box::new(|_, _, _| {Spans::from("")}),
+            children: items,
+        };
+        
+        let selected_item: Option<&TreeItem>= 
+            state.selection().and_then(|treeloc| root.traverse(treeloc));
+        
+        selected_item.map(|tree_item| {
+            let rendered: Spans = (tree_item.render)(width, false, false);
+            
+            // hack number 3: it looks like TreeItem should sometimes return String, too?
+            //                I'm not sure what the best interface is but I'm now sure
+            //                it's not the current one
+            //                
+            //                I think PaneTxnDetails wants to have its own tree structure
+            //                which it operates over and then turns into a root ListItem
+            //                which it passes into the Tree widget
+            let as_string =
+                rendered.0.iter().map(|span| { span.content.clone() }).collect();
+            
+            as_string
+        })
+    }
 }

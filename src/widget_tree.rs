@@ -42,6 +42,20 @@ impl<'a> TreeItem<'a> {
             children: vec![]
         }
     }
+    
+    pub fn traverse(&self, treeloc: &TreeLoc) -> Option<&TreeItem<'a>> {
+        let mut result = self;
+        
+        for idx in treeloc.iter() {
+            if *idx >= result.children.len() {
+                return None
+            }
+            
+            result = &result.children[*idx];
+        }
+        
+        Some(result)
+    }
 }
 
 impl<'a> From<String> for TreeItem<'a> {
@@ -214,7 +228,14 @@ impl TreeState {
         // TOOD(2022-09-24) if I was better at rust I would be able to avoid this clone
         self.selection = self.selection.clone().next();
     }
-
+    
+    pub fn selection(&self) -> Option<&TreeLoc> {
+        use TreeSelection as TS;
+        match self.selection {
+            TS::None => None,
+            TS::Just(ref loc) | TS::Prev(ref loc) | TS::Next(ref loc) => Some(loc),
+        }
+    }
 }
 
 impl<'a, 'b> Tree<'a, 'b> {

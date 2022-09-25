@@ -1,5 +1,6 @@
 use crate::data;
 use crate::pane_txn_details;
+use crate::pane_txn_details::PaneTransactionDetails;
 use crate::pane_txn_list;
 use crate::pane_block_list;
 use crate::column;
@@ -1074,7 +1075,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
                     }
                 }
             }
-        } else if self.pane_state.focus() == FocusedPane::Transactions || self.pane_state.focus() == FocusedPane::Transaction {
+        } else if self.pane_state.focus() == FocusedPane::Transactions {
             match self.txn_list_selected_txn() {
                 None => None,
                 Some(txn) => {
@@ -1083,9 +1084,18 @@ impl<'a, T: data::Data> TUI<'a, T> {
                     let rest = util::format_bytes_into_width(txn.hash.as_bytes(), remaining_width);
                     let result = prefix + &rest;
                     
-                    Some(Spans::from(Span::raw(result)))
+                    Some(Spans::from(result))
                 }
             }
+        } else if self.pane_state.focus() == FocusedPane::Transaction {
+            let line = PaneTransactionDetails::status_line(
+                width,
+                &self.txn_list_selected_txn(),
+                &self.txn_list_selected_receipt(),
+                &self.txn_details_state,
+            );
+            
+            line.map(|line| Spans::from(format!("  {}", line)))
         } else {
             None
         }
