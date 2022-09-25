@@ -1,62 +1,104 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Debug};
 
-use tui::{widgets::{StatefulWidget, Block, Widget, Paragraph}, text::{Spans, Span}, layout::Rect, buffer::Buffer};
+use tui::{widgets::{StatefulWidget, Block, Widget, Paragraph}, text::{Spans, Span}, layout::Rect, buffer::Buffer, style::Style};
+
+use crate::style;
 
 pub type TreeLoc = Vec<usize>;
 
 pub const INDENT_WIDTH: usize = 2;
 
-// renders a tree. note that our caller is responsible for handling highlights
-#[derive(Debug, PartialEq, Eq)]
-pub struct TreeItem<T> {
-    pub content: T,
-    pub children: Vec<TreeItem<T>>,
+pub trait RenderFn<'a>: Fn(u16, bool, bool) -> Spans<'a> {
+    // width, is_selected, is_focused
+}
+ 
+impl<'a, F> RenderFn<'a> for F where F: Fn(u16, bool, bool) -> Spans<'a> { }
+
+impl<'a> std::fmt::Debug for dyn RenderFn<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RenderFunction")
+    }
 }
 
-impl<T> TreeItem<T> {
-    pub fn new(content: T) -> TreeItem<T> {
+// renders a tree. note that our caller is responsible for handling highlights
+pub struct TreeItem<'a> {
+    pub render: Box<dyn RenderFn<'a> + 'a>,
+    pub children: Vec<TreeItem<'a>>,
+    // TODO(2022-09-23) what does it even mean for us to accept the lifetime of the
+    //                  element the passed-in closure returns?
+}
+
+// derive(Debug) causes issues with lifetimes so lets implement it manually
+impl<'a> Debug for TreeItem<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TreeItem(len={})", self.children.len())
+    }
+}
+
+impl<'a> TreeItem<'a> {
+    pub fn new(render: impl RenderFn<'a> + 'a) -> TreeItem<'a> {
         TreeItem {
-            content,
+            render: Box::new(render),
             children: vec![]
         }
     }
-    
-    pub fn traverse(&self, loc: TreeLoc) -> Option<&T> {
-        let mut result = self;
-        
-        for idx in loc.into_iter() {
-            match result.children.get(idx) {
-                None => return None,
-                Some(child) => {
-                    result = child;
-                }
+}
+
+impl<'a> From<String> for TreeItem<'a> {
+    fn from(s: String) -> TreeItem<'a> {
+        let render = move |_width: u16, focused: bool, selected: bool| {
+            style::selected_span(s.clone(), selected, focused);
+            if selected {
+                Spans::from(
+                    Span::styled(
+                        s.clone(),
+                        Style::default().bg(style::selection_color(focused))
+                    )
+                )
+            } else {
+                Spans::from(s.clone())
             }
-        }
+        };
         
-        return Some(&result.content)
+        TreeItem {
+            render: Box::new(render),
+            children: vec![],
+        }
     }
 }
 
-impl<'a> From<String> for TreeItem<Spans<'a>> {
-    fn from(s: String) -> TreeItem<Spans<'a>> {
-        TreeItem::new(Spans::from(s))
+impl<'a> From<&'a str> for TreeItem<'a> {
+    fn from(s: &'a str) -> TreeItem<'a> {
+        let render = move |_width: u16, focused: bool, selected: bool| {
+            if selected {
+                Spans::from(
+                    Span::styled(
+                        s,
+                        Style::default().bg(style::selection_color(focused))
+                    )
+                )
+            } else {
+                Spans::from(s)
+            }
+        };
+        
+        TreeItem::new(Box::new(render))
     }
 }
 
-impl<'a> From<&'a str> for TreeItem<Spans<'a>> {
-    fn from(s: &'a str) -> TreeItem<Spans<'a>> {
-        TreeItem::new(Spans::from(s))
-    }
-}
-
-impl<'a> From<Spans<'a>> for TreeItem<Spans<'a>> {
-    fn from(s: Spans<'a>) -> TreeItem<Spans<'a>> {
-        TreeItem::new(s)
+impl<'a> From<Spans<'a>> for TreeItem<'a> {
+    fn from(s: Spans<'a>) -> TreeItem<'a> {
+        let render = move |_width: u16, _focused: bool, _selected: bool| {
+            let cloned = s.clone();
+            cloned
+        };
+        
+        TreeItem::new(Box::new(render))
     }
 }
 
 // TODO(2022-09-22) a TreeItems(Vec<TreeItem>) struct seems to make sense? That's also where traverse() belongs
-fn flatten_items<'a>(items: Vec<TreeItem<Spans<'a>>>) -> Vec<(TreeLoc, Spans<'a>)> {
+fn flatten_items<'a>(items: Vec<TreeItem<'a>>) -> Vec<(TreeLoc, impl RenderFn<'a>)> {
     let mut result = vec![];
     
     for (idx, item) in items.into_iter().enumerate() {
@@ -72,10 +114,10 @@ fn flatten_items<'a>(items: Vec<TreeItem<Spans<'a>>>) -> Vec<(TreeLoc, Spans<'a>
     return result;
 }
 
-fn flatten_item<'a>(item: TreeItem<Spans<'a>>) -> Vec<(TreeLoc, Spans<'a>)> {
+fn flatten_item<'a>(item: TreeItem<'a>) -> Vec<(TreeLoc, impl RenderFn<'a>)> {
     let mut result = vec![];
     
-    result.push((vec![], item.content));
+    result.push((vec![], item.render));
 
     for (idx, item) in item.children.into_iter().enumerate() {
         let flattened = flatten_item(item);
@@ -93,42 +135,104 @@ fn flatten_item<'a>(item: TreeItem<Spans<'a>>) -> Vec<(TreeLoc, Spans<'a>)> {
 pub struct Tree<'a, 'b> {
     pub block: Option<Block<'a>>,
     
+    pub focused: bool,
+    
     // TODO: should this, instead, be a root TreeItem?
 
     // 2022-09-22 decent chance I regret choosing Spans over Text. Spans represents a
     //            single line of content where Text represents multiple lines. I'm making
     //            life simpler for now but might need to refactor this later
-    pub items: Vec<TreeItem<Spans<'b>>>,
+    pub items: Vec<TreeItem<'b>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum TreeSelection {
+    None,
+    Just(TreeLoc),
+    Next(TreeLoc),
+    Prev(TreeLoc),
+}
+
+impl TreeSelection {
+    fn next(self) -> Self {
+        use TreeSelection::*;
+        match self {
+            None => None,
+            Prev(treeloc) => Just(treeloc),
+            Just(treeloc) => Next(treeloc),
+            Next(treeloc) => Next(treeloc),
+        }
+    
+    }
+    
+    fn prev(self) -> Self {
+        use TreeSelection::*;
+        match self {
+            None => None,
+            Prev(treeloc) => Prev(treeloc),
+            Just(treeloc) => Prev(treeloc),
+            Next(treeloc) => Just(treeloc),
+        }
+    }
+}
+
+impl Default for TreeSelection {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 pub struct TreeState {
     pub top: TreeLoc,
-    pub selection: Option<TreeLoc>,
+    selection: TreeSelection,
     pub collapsed: HashSet<TreeLoc>,
 }
 
 impl Default for TreeState {
     fn default() -> Self {
-        TreeState { top: vec![], selection: None, collapsed: HashSet::new() }
+        TreeState {
+            top: vec![],
+            selection: TreeSelection::default(),
+            collapsed: HashSet::new()
+        }
     }
 }
 
 impl TreeState {
     pub fn select(&mut self, treeloc: TreeLoc) {
-        self.selection = Some(treeloc);
+        self.selection = TreeSelection::Just(treeloc);
     }
+    
+
+    /// selects either the previous child or our parent
+    pub fn select_prev(&mut self) {
+        self.selection = self.selection.clone().prev();
+    }
+    
+    /// selects the next child
+    pub fn select_next(&mut self) {
+        // TOOD(2022-09-24) if I was better at rust I would be able to avoid this clone
+        self.selection = self.selection.clone().next();
+    }
+
 }
 
 impl<'a, 'b> Tree<'a, 'b> {
-    pub fn new(items: Vec<TreeItem<Spans<'b>>>) -> Tree<'a, 'b> {
+    pub fn new(items: Vec<TreeItem<'b>>) -> Tree<'a, 'b> {
         Tree {
             block: None,
             items: items,
+            focused: false,
         }
     }
     
     pub fn block(mut self, block: Block<'a>) -> Tree<'a, 'b> {
         self.block = Some(block);
+        self
+    }
+    
+    pub fn focused(mut self, focused: bool) -> Tree<'a, 'b>{
+        self.focused = focused;
         self
     }
     
@@ -149,6 +253,34 @@ impl<'a, 'b> Tree<'a, 'b> {
         // - you cannot select a collapsed item
         // 
         // TODO: update state.top
+    }
+    
+    // when select_next()/select_prev() are called they do not know the shape of the data so they
+    // cannot navigate to the next/prev element. Now that we have the data in front of us we honor
+    // the request
+    fn fix_selection(treelocs: Vec<&TreeLoc>, state: &mut TreeState) {
+        // TODO(2022-09-24) something needs to be changed here once support for collapsing items is
+        //                  added as written these allow you to select merged items
+        use TreeSelection::*;
+        match state.selection {
+            None => return,
+            Just(_) => return,
+
+            Prev(ref treeloc) => {
+                let partition = treelocs.binary_search(&&treeloc);
+                let pos = match partition { Ok(pos) => pos, Err(pos) => pos };
+                
+                let pos = pos.saturating_sub(1);
+                state.selection = Just(treelocs[pos].clone());
+            },
+            Next(ref treeloc) => {
+                let partition = treelocs.binary_search(&&treeloc);
+                let pos = match partition { Ok(pos) => pos, Err(pos) => pos };
+
+                let pos = std::cmp::min(pos + 1, treelocs.len() - 1);
+                state.selection = Just(treelocs[pos].clone());
+            }
+        }
     }
     
     fn inner_area(&self, area: Rect) -> Rect {
@@ -184,12 +316,18 @@ impl<'a> StatefulWidget for Tree<'a, 'a> {
             // nothing to render!
             return;
         }
-        
+
         // TODO: actually implement scrolling
         self.scroll(area, state);
+
+        let items = flatten_items(self.items);
+        
+        {
+            let treelocs: Vec<&TreeLoc> = items.iter().map(|(loc, _fn)| {loc}).collect();
+            Self::fix_selection(treelocs, state);
+        }
         
         let mut spans: Vec<Spans> = vec![];
-        let items = flatten_items(self.items);
         for (treeloc, item) in items.into_iter() {
             if treeloc < state.top {
                 continue;
@@ -199,7 +337,19 @@ impl<'a> StatefulWidget for Tree<'a, 'a> {
             let indent = std::iter::repeat(" ").take(indent * INDENT_WIDTH).collect::<String>();
             
             let mut with_indent = vec![Span::from(indent)];
-            with_indent.extend(item.0);
+            
+            use TreeSelection::*;
+            let selected = match state.selection {
+                None => false,
+                Just(ref selection) => *selection == treeloc,
+                
+                // TODO(2022-09-24) it's possible to make this error unrepresentable, we should
+                //                  not be operating directly over self.selection...
+                Prev(_) | Next(_) => panic!("should have called fix_selection()"),
+            };
+            
+            let rendered: Spans = (item)(area.width, self.focused, selected);
+            with_indent.extend(rendered.0);
             
             // TODO: if collapsed include a grey (collapsed) indication
             
@@ -209,37 +359,5 @@ impl<'a> StatefulWidget for Tree<'a, 'a> {
         
         let widget = Paragraph::new(spans);
         widget.render(area, buf);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TreeItem;
-    
-    #[test]
-    fn traverse_no_children() {
-        let root: TreeItem<usize> = TreeItem {
-            content: 0,
-            children: vec![],
-        };
-        
-        assert_eq!(root.traverse(vec![]), Some(&0));
-        assert_eq!(root.traverse(vec![0]), None);
-    }
-    
-    #[test]
-    fn traverse_children() {
-        let root: TreeItem<usize> = TreeItem {
-            content: 0,
-            children: vec![TreeItem {
-                content: 1,
-                children: vec![],
-            }],
-        };
-        
-        assert_eq!(root.traverse(vec![]), Some(&0));
-        assert_eq!(root.traverse(vec![0]), Some(&1));
-        assert_eq!(root.traverse(vec![0, 0]), None);
-        assert_eq!(root.traverse(vec![1]), None);
     }
 }

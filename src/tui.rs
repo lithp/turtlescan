@@ -9,7 +9,7 @@ use crate::widget_tree::TreeState;
 
 use ethers_core::types::{Block as EthBlock, Transaction, TransactionReceipt, TxHash};
 use ethers_providers::{Provider, Ws};
-use log::{debug, warn};
+use log::{debug, warn, error};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use tui::text::Spans;
@@ -248,6 +248,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
 
         let receipt_columns = column::default_receipt_columns();
         let receipt_column_len = receipt_columns.len();
+        
+        // TODO(2022-09-23) this hard-coded selection is just for debugging
+        let mut txn_details_state = TreeState::default();
+        txn_details_state.select(vec![0, 1]);
 
         TUI {
             block_list_height: None,
@@ -261,7 +265,7 @@ impl<'a, T: data::Data> TUI<'a, T> {
             txn_list_selected: None,
             txn_list_length: None,
             
-            txn_details_state: TreeState::default(),
+            txn_details_state,
 
             configuring_columns: false,
             pane_state: PaneState::JustBlocks,
@@ -633,7 +637,9 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         self.txn_list_selected = Some(selection.saturating_sub(1));
                     }
                 }
-                FocusedPane::Transaction => {}
+                FocusedPane::Transaction => {
+                    self.txn_details_state.select_prev();
+                }
             },
             true => {
                 let item_count = self.column_count();
@@ -665,7 +671,10 @@ impl<'a, T: data::Data> TUI<'a, T> {
                         self.txn_list_selected = Some(new_selection);
                     }
                 }
-                FocusedPane::Transaction => {}
+                FocusedPane::Transaction => {
+                    self.txn_details_state.select_next();
+                    
+                }
             },
         };
     }
@@ -843,9 +852,6 @@ impl<'a, T: data::Data> TUI<'a, T> {
             is_focused: self.pane_state.focus() == FocusedPane::Transaction,
             area: area,
         };
-        
-        // hard-coded for now, eventually the user should have control over this
-        self.txn_details_state.select(vec![0, 1]);
         
         pane.draw(frame, &mut self.txn_details_state);
     }
@@ -1155,9 +1161,29 @@ impl<'a, T: data::Data> TUI<'a, T> {
     }
 }
 
+fn setup_panic_handler() {
+    // it's almost a certainty that if I really understood how unwinding works, as well as Termion,
+    // I would know a much better way to do this. All I want to do is defer the default hook (which
+    // prints to the terminal) until after run_tui has unwound, allowing us to write to the MainScreen
+
+    // let raw_handle = io::stdout().into_raw_mode().unwrap();
+    
+    let default_hook = std::panic::take_hook();
+    
+    std::panic::set_hook(Box::new(move |info| {
+        // raw_handle.suspend_raw_mode()
+        //     .unwrap_or_else(|e| log::error!("could not suspend raw mode: {}", e));
+        // write!(io::stdout().into_raw_mode().unwrap(), "{}", ToMainScreen).unwrap();
+        error!("{:?}", info);
+        default_hook(info);
+    }))
+}
+
 // TODO(2021-08-27) why does the following line not work?
 // fn run_tui() -> Result<(), Box<io::Error>> {
 pub fn run_tui(provider: Provider<Ws>, cache_path: path::PathBuf) -> Result<(), Box<dyn Error>> {
+    setup_panic_handler();
+
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);

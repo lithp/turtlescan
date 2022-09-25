@@ -34,39 +34,25 @@ impl PaneTransactionDetails {
             .map(|txn| util::format_block_hash(txn.hash.as_bytes()))
             .unwrap_or("Transaction".to_string());
         
-        let tree_item = self.items(state);
+        let tree_item = self.items();
         
-        let widget = Tree::new(tree_item).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(style::border_color(self.is_focused)))
-                .title(title),
-        );
+        let widget = Tree::new(tree_item)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(style::border_color(self.is_focused)))
+                    .title(title))
+            .focused(self.is_focused);
         
         frame.render_stateful_widget(widget, self.area, state);
     }
     
-    pub fn items(&self, state: &TreeState) -> Vec<TreeItem<Spans>> {
-        let mut txn_selection = None;
-        match state.selection {
-            None => (),
-            Some(ref selection) => {
-                match selection.get(0) {
-                    None => (),
-                    Some(idx) => {
-                        if *idx == 0 {
-                            txn_selection = selection.get(1).cloned();
-                        }
-                    }
-                }
-            }
-        }
-        
+    pub fn items<'a>(&self) -> Vec<TreeItem<'a>> {
         match &self.txn {
             None => vec![],
             Some(txn) => {
                 vec![
-                    self.txn_tree_item(txn, txn_selection),
+                    self.txn_tree_item(txn),
                     Self::receipt_tree_item(&self.receipt),
                 ]
             }
@@ -82,9 +68,11 @@ impl PaneTransactionDetails {
     }
     
     // TODO(2022-09-23) this should probably be unified with our txn columns
-    fn txn_tree_item(&self, txn: &Transaction, selection_offset: Option<usize>) -> TreeItem<Spans> {
-        // TODO: how do we represent `txn.inpur`?
-        //       we should at very least print and try to parse the 4bytes!
+    fn txn_tree_item<'a>(&self, txn: &Transaction) -> TreeItem<'a> {
+        // TODO: how do we represent `txn.input`?
+        //       we should at very least print and try to parse the 4bytes, that's
+        //       just about the most important field and it's currently completely
+        //       hidden!
         let kvs = vec![
             Self::make_kv_from_hash(self.area.width, "hash", txn.hash.as_bytes()),
             Self::make_kv_from_hash(self.area.width, "from", txn.from.as_bytes()),
@@ -99,50 +87,52 @@ impl PaneTransactionDetails {
             ("max gas fee", txn.max_fee_per_gas.map(|price| price.to_string()).unwrap_or("None".to_string())),
         ];
         
-        let children: Vec<Spans> = kvs.iter().enumerate().map(|(idx, (key, value))| {
-            let selected = match selection_offset {
-                None => false,
-                Some(selection) => idx == selection,
+        // TODO(2022-09-24): use the passed width, rather than hard-coding it ourselves
+        let children: Vec<TreeItem> = kvs.into_iter().map(|(key, value)| {
+            let render = move |_width: u16, focused: bool, selected: bool| -> Spans {
+                let key_span = Span::from(format!("{}: ", key));
+                let value_span = style::selected_span(value.clone(), selected, focused);
+                Spans::from(vec![key_span, value_span])
             };
             
-            if selected {
-                Spans::from(vec![
-                    Span::from(format!("{}: ", key)),
-                    Span::styled(format!("{}", value), Style::default().bg(style::selection_color(self.is_focused))),
-                ])
-            } else {
-                Spans::from(format!("{}: {}", key, value))
-            }
+            TreeItem::new(render)
         }).collect();
-        let children: Vec<TreeItem<Spans>> = children.into_iter().map(|s| TreeItem::from(s)).collect();
         
-        let content = Spans::from("txn:");
-        
-        TreeItem { content, children }
+        let mut result = TreeItem::from("txn:");
+        result.children = children;
+        result
     }
     
-    fn receipt_tree_item(receipt: &Option<TransactionReceipt>) -> TreeItem<Spans> {
-        let content = match receipt {
-            None => Spans::from("receipt: (fetching)"),
-            Some(_) => Spans::from("receipt:"),
-        };
+    fn receipt_tree_item<'a>(receipt: &Option<TransactionReceipt>) -> TreeItem<'a> {
+        let mut result = TreeItem::from(
+            match receipt {
+                None => "receipt: (fetching)",
+                Some(_) => "receipt:",
+            }
+        );
         
-        let children = match receipt {
+        result.children = match receipt {
             None => vec![],
             Some(receipt) => {
                 let columns = column::default_receipt_columns();
                 
-                columns.iter()
+                columns.into_iter()
                     .map(|col| {
-                        TreeItem::new(Spans::from(format!("  {}: {}", col.name, (col.render)(&receipt))))
+                        // TODO(2022-09-24) is there a way to save ourselves from the clone?
+                        //                   there might be for now, but there probably isn't
+                        //                   once col.render accepts a width argument
+                        let cloned = receipt.clone();
+                        TreeItem::new(move |_width: u16, focused: bool, selected: bool| {
+                            let key_span = Span::from(format!("{}: ", col.name));
+                            let rendered = (col.render)(&cloned);
+                            let val_span = style::selected_span(rendered, selected, focused);
+                            Spans::from(vec![key_span, val_span])
+                        })
                     })
                     .collect()
             }
         };
-        
-        TreeItem {
-            content: content,
-            children: children,
-        }
+
+        result
     }
 }
